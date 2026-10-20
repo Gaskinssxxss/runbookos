@@ -86,7 +86,7 @@ try:
                 active=r.returncode == 0 and r.stdout.strip() == "active"
                 emit(True, {"unit":unit,"active":active,"state":r.stdout.strip() or r.stderr.strip()})
             else:
-                emit(r.returncode == 0, {"unit":unit,"restarted":r.returncode == 0,"detail":r.stderr.strip()}, None if r.returncode == 0 else "systemctl returned non-zero", r.returncode != 0)
+                emit(r.returncode == 0, {"unit":unit,"restarted":r.returncode == 0,"detail":r.stderr.strip()}, None if r.returncode == 0 else "systemctl returned non-zero", False)
         except subprocess.TimeoutExpired:
             emit(False, {"unit":unit}, "action timeout", action.endswith("restart"))
     elif action == "systemd.failed_units":

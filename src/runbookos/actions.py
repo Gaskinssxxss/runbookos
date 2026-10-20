@@ -23,13 +23,27 @@ class ActionDefinition:
     risk: str = "low"
     arguments_model: type[BaseModel] | None = None
     max_timeout_seconds: int = 300
+    expected_impact: str = "No service impact is expected from this read-only action."
+    rollback: str = "Not applicable; this action does not mutate system state."
+    rollback_available: bool = False
 
 
 REGISTRY: dict[str, ActionDefinition] = {
     "systemd.is_active": ActionDefinition("systemd.is_active", True, frozenset({"unit"})),
     "systemd.failed_units": ActionDefinition("systemd.failed_units", True, frozenset()),
     "systemd.restart": ActionDefinition(
-        "systemd.restart", False, frozenset({"unit"}), risk="medium"
+        "systemd.restart",
+        False,
+        frozenset({"unit"}),
+        risk="medium",
+        max_timeout_seconds=30,
+        expected_impact=(
+            "The named systemd unit is restarted; active requests or connections may be interrupted."
+        ),
+        rollback=(
+            "A restart is not reversible. Recovery requires a separately planned and approved action; "
+            "RunbookOS will not restart again automatically."
+        ),
     ),
     "os.uptime": ActionDefinition("os.uptime", True, frozenset()),
     "os.memory": ActionDefinition("os.memory", True, frozenset()),

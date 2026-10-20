@@ -222,11 +222,21 @@ def plan(
 
 @app.command()
 def run(
-    ctx: typer.Context, plan_id: str = typer.Argument(..., help="Persisted plan UUID.")
+    ctx: typer.Context,
+    plan_id: str = typer.Argument(..., help="Persisted plan UUID."),
+    confirm: bool = typer.Option(
+        False,
+        "--confirm",
+        help="Explicitly confirm execution of an approved remediation plan.",
+    ),
 ) -> None:
-    """Execute an approved and unchanged plan; no automatic retries are performed."""
+    """Execute an approved and unchanged plan; remediation also requires --confirm."""
     try:
-        execution_id, status = _engine(ctx).execute(plan_id)
+        execution_id, status = _engine(ctx).execute(
+            plan_id,
+            confirm_remediation=confirm,
+            confirming_actor=getpass.getuser() if confirm else None,
+        )
     except Exception as exc:
         _fail(exc)
     typer.echo(f"Execution {execution_id}: {status}")
@@ -238,6 +248,18 @@ def run(
         raise typer.Exit(3)
     if status != "succeeded":
         raise typer.Exit(1)
+
+
+@app.command("remediation-preview")
+def remediation_preview(
+    ctx: typer.Context, plan_id: str = typer.Argument(..., help="Persisted remediation plan UUID.")
+) -> None:
+    """Display trusted impact and verification metadata for a remediation plan."""
+    try:
+        result = _engine(ctx).remediation_preview(plan_id)
+    except Exception as exc:
+        _fail(exc)
+    _json(result)
 
 
 @app.command()

@@ -1,4 +1,4 @@
-# RunbookOS v0.4.1 — Secure Operator Dashboard
+# RunbookOS v0.5.0 — Human-Controlled Remediation MVP
 
 Development branch: `feat/v0.4.0-operator-dashboard`, based on the v0.3.2 integrated operations baseline. This is a local-first operator dashboard MVP, not a production release.
 
@@ -44,6 +44,12 @@ runbookos --db ~/.local/state/runbookos/runbookos.sqlite3 dashboard serve \
 ```
 
 Open `http://127.0.0.1:8780/`. The auth verifier must be a regular file owned by the current account with no group/other permissions. Sessions are memory-only and end on process restart. The listener is plain HTTP on loopback; do not expose it through a network proxy. See [`docs/dashboard-security-v0.4.0.md`](docs/dashboard-security-v0.4.0.md).
+
+## v0.5.0 approved remediation
+
+`systemd.restart` remains disabled by default in shipped policies. A remediation runbook must target one host, contain exactly one registered mutable step, and include assertion-bearing read-only preflight and postflight checks. Review a persisted plan using `runbookos remediation-preview PLAN_ID`, approve it with `runbookos approve`, then separately execute using `runbookos run PLAN_ID --confirm`. The CLI records the local OS operator identity for the explicit confirmation. Approval is one-time, expiring, and bound to the immutable plan and current implementation/configuration fingerprints.
+
+Execution results carry `VERIFIED_SUCCESS`, `VERIFIED_FAILURE`, `UNKNOWN`, or `NOT_EXECUTED`. An uncertain SSH result is never retried, and no automatic rollback is attempted. The dashboard, alerts, and AI cannot invoke remediation. See [`docs/remediation-security-v0.5.0.md`](docs/remediation-security-v0.5.0.md) and the reserved-target example [`examples/runbooks/disposable-systemd-restart.yml`](examples/runbooks/disposable-systemd-restart.yml). The example target is intentionally absent from the shipped inventory and policy.
 
 ## Install
 

@@ -11,11 +11,29 @@ from runbookos.errors import ApprovalError, ConfigurationError, PolicyDenied
 from runbookos.models import Runbook
 
 
-@pytest.mark.parametrize("runbook", sorted((ROOT / "examples/runbooks").glob("*.yml")))
+@pytest.mark.parametrize(
+    "runbook",
+    sorted(
+        path
+        for path in (ROOT / "examples/runbooks").glob("*.yml")
+        if path.name != "disposable-systemd-restart.yml"
+    ),
+)
 def test_read_only_runbook_examples_validate(runbook: Path) -> None:
     document, _ = load_runbook(runbook)
     validate_runbook(document)
     assert document.metadata.risk == "low"
+
+
+def test_disposable_remediation_example_is_strictly_phased() -> None:
+    example = ROOT / "examples/runbooks/disposable-systemd-restart.yml"
+    document, _ = load_runbook(example)
+    validate_runbook(document)
+    assert document.metadata.risk == "medium"
+    assert len(document.targets) == 1
+    assert len(document.steps) == 1
+    assert document.steps[0].action == "systemd.restart"
+    assert all(step.verify for step in document.preflight + document.postflight)
 
 
 def test_portable_service_examples_plan_ready_without_ssh(tmp_path: Path) -> None:

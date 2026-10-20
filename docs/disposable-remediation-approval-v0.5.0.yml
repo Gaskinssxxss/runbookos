@@ -1,0 +1,43 @@
+schema_version: 1
+status: NOT_AUTHORIZED
+purpose: Future operator review for isolated remediation acceptance only.
+target:
+  alias: disposable-test-01
+  address: 192.0.2.50
+  environment: disposable-only
+  service: runbookos-sample.service
+source:
+  executor: operator-controlled RunbookOS CLI
+  identity: dedicated non-sudo account, not provisioned by this repository
+action:
+  id: systemd.restart
+  parameters:
+    unit: runbookos-sample.service
+  runbook: examples/runbooks/disposable-systemd-restart.yml
+network:
+  changes_authorized: false
+  ssh_port: 22
+privileges:
+  sudo_authorized: false
+  additional_privileges_authorized: false
+approval:
+  required_before_any_live_acceptance: true
+  requires_exact_target_identity_and_host_key: true
+  requires_operator_review_of_preview_and_policy: true
+  requires_time_bounded_one_time_plan_approval: true
+  requires_explicit_run_confirmation: true
+limits:
+  maximum_action_timeout_seconds: 30
+  maximum_mutating_actions_per_plan: 1
+  automatic_retry: false
+  automatic_rollback: false
+  ai_or_alert_initiation: false
+cleanup:
+  vm_creation_or_start_authorized: false
+  host_hypervisor_changes_authorized: false
+  service_changes_authorized: false
+  preserve_evidence_and_audit: true
+notes:
+  - This manifest is a review template, not an authorization to provision or execute.
+  - The documentation-only target address is TEST-NET-1 and must never be used as a live endpoint.
+  - A systemd restart may require privileges unavailable to a non-sudo account; do not expand privileges to make the test pass.

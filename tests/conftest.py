@@ -30,6 +30,21 @@ hosts:
     remediation_actions = "[systemd.restart]" if remediation else "[]"
     verify_path = "data.restarted" if remediation else "data.active"
     verify_operator = "is_true"
+    phases = (
+        """preflight:
+  - id: pre-restart-active
+    action: systemd.is_active
+    with: {unit: nginx.service}
+    verify: [{path: data.active, operator: is_true}]
+postflight:
+  - id: post-restart-active
+    action: systemd.is_active
+    with: {unit: nginx.service}
+    verify: [{path: data.active, operator: is_true}]
+"""
+        if remediation
+        else ""
+    )
     policy.write_text(f"""schema_version: 1
 default_decision: deny
 approval:
@@ -61,7 +76,7 @@ metadata:
   description: Test only.
   risk: {risk}
 targets: [test-web]
-steps:
+{phases}steps:
   - id: check-service
     action: {action}
     with: {{unit: nginx.service}}

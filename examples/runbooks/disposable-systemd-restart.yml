@@ -1,0 +1,23 @@
+api_version: runbookos/v1
+kind: Runbook
+metadata:
+  id: disposable-service-restart
+  name: Disposable service restart acceptance example
+  description: One approved systemd restart with explicit read-only state checks.
+  risk: medium
+targets: [disposable-test-01]
+preflight:
+  - id: service-must-be-active-before-restart
+    action: systemd.is_active
+    with: {unit: runbookos-sample.service}
+    verify: [{path: data.active, operator: is_true}]
+steps:
+  - id: restart-disposable-service
+    action: systemd.restart
+    with: {unit: runbookos-sample.service}
+    verify: [{path: data.restarted, operator: is_true}]
+postflight:
+  - id: service-must-be-active-after-restart
+    action: systemd.is_active
+    with: {unit: runbookos-sample.service}
+    verify: [{path: data.active, operator: is_true}]

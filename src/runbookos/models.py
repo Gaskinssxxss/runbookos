@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
+from enum import StrEnum
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -230,3 +231,10 @@ class PlanDocument(StrictModel):
     plan_hash: str
     source_hashes: dict[str, str]
     risk: Literal["low", "medium", "high"]
+
+
+class RemediationOutcome(StrEnum):
+    VERIFIED_SUCCESS = "VERIFIED_SUCCESS"
+    VERIFIED_FAILURE = "VERIFIED_FAILURE"
+    UNKNOWN = "UNKNOWN"
+    NOT_EXECUTED = "NOT_EXECUTED"

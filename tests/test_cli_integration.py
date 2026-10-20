@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import getpass
 import json
 from pathlib import Path
 
@@ -7,6 +8,7 @@ from conftest import write_config_tree
 from typer.testing import CliRunner
 
 from runbookos.cli import app
+from runbookos.store import SQLiteStore
 
 
 def test_cli_check_history_and_audit(tmp_path: Path, key_material, monkeypatch) -> None:
@@ -73,19 +75,19 @@ def test_approval_command_executes_once_only(tmp_path: Path, key_material, monke
     bindir.mkdir()
     calls = tmp_path / "calls.txt"
     fake_ssh = bindir / "ssh"
-    response = json.dumps(
-        {
-            "ok": True,
-            "data": {"unit": "nginx.service", "restarted": True},
-            "error": None,
-            "uncertain": False,
-        }
-    )
+    responses = [
+        {"ok": True, "data": {"unit": "nginx.service", "active": True}},
+        {"ok": True, "data": {"unit": "nginx.service", "restarted": True}},
+        {"ok": True, "data": {"unit": "nginx.service", "active": True}},
+    ]
     fake_ssh.write_text(
-        "#!/usr/bin/python3\n"
-        "import json,sys\n"
-        f"open({str(calls)!r},'a').write('called\\n')\n"
-        f"print({response!r})\n"
+        "#!/usr/bin/python3\nimport json,sys\n"
+        f"calls={str(calls)!r}\n"
+        "with open(calls,'a+') as f:\n"
+        " f.seek(0); index=len(f.readlines()); f.write('called\\n')\n"
+        f"responses={responses!r}\n"
+        "response=responses[index]\nresponse.update(error=None,uncertain=False)\n"
+        "print(json.dumps(response))\n"
     )
     fake_ssh.chmod(0o700)
     monkeypatch.setenv("PATH", str(bindir) + ":/usr/bin:/bin")
@@ -106,18 +108,43 @@ def test_approval_command_executes_once_only(tmp_path: Path, key_material, monke
     assert planned.exit_code == 0, planned.output
     plan_id = json.loads(planned.output)["plan_id"]
     assert json.loads(planned.output)["status"] == "approval_required"
+    preview = runner.invoke(app, root_args + ["remediation-preview", plan_id])
+    assert preview.exit_code == 0, preview.output
+    preview_doc = json.loads(preview.output)
+    assert preview_doc["target"]["alias"] == "test-web"
+    assert preview_doc["action_id"] == "systemd.restart"
+    assert preview_doc["explicit_execution_confirmation_required"] is True
+    assert preview_doc["rollback"]["available"] is False
+    assert "interrupted" in preview_doc["expected_service_impact"]
+    assert len(preview_doc["read_only_preconditions"]) == 1
+    assert len(preview_doc["postflight_checks"]) == 1
     approval = runner.invoke(
         app, root_args + ["approve", plan_id, "--reason", "Approved isolated fixture test"]
     )
     assert approval.exit_code == 0, approval.output
-    executed = runner.invoke(app, root_args + ["run", plan_id])
+    cancelled = runner.invoke(app, root_args + ["run", plan_id])
+    assert cancelled.exit_code == 2 and "explicit execution confirmation" in cancelled.output
+    assert not calls.exists()
+    executed = runner.invoke(app, root_args + ["run", plan_id, "--confirm"])
     assert executed.exit_code == 0, executed.output
     assert "succeeded" in executed.output
-    assert calls.read_text().splitlines() == ["called"]
-    replay = runner.invoke(app, root_args + ["run", plan_id])
+    assert calls.read_text().splitlines() == ["called"] * 3
+    history = runner.invoke(app, root_args + ["history"])
+    history_doc = json.loads(history.output)[0]
+    assert history_doc["summary"]["remediation_outcome"] == "VERIFIED_SUCCESS"
+    audit = runner.invoke(app, root_args + ["audit"])
+    assert audit.exit_code == 0 and "AUDIT OK" in audit.output
+    with SQLiteStore(paths.database)._connection() as db:
+        started = db.execute(
+            "SELECT payload_json FROM audit_events WHERE kind='execution.started'"
+        ).fetchone()
+    authorization = json.loads(started[0])["operator_confirmation"]
+    assert authorization["confirmed_by"] == getpass.getuser()
+    assert authorization["confirmation"] == "explicit CLI --confirm"
+    replay = runner.invoke(app, root_args + ["run", plan_id, "--confirm"])
     assert replay.exit_code == 2, replay.output
     assert "no valid, unused approval" in replay.output
-    assert calls.read_text().splitlines() == ["called"]
+    assert calls.read_text().splitlines() == ["called"] * 3
 
 
 def test_unknown_ssh_result_is_persisted_without_retry(

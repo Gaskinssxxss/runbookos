@@ -6,19 +6,25 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from . import __version__
 from .actions import REGISTRY, validate_argument_keys, validate_phase_action
 from .config import file_digest, load_inventory, load_policy, load_runbook, load_ssh_profiles
 from .errors import ApprovalError, ConfigurationError, ExecutionUnknown, PolicyDenied
-from .models import Assertion, PlanAction, PlanDocument, Runbook
+from .models import Assertion, PlanAction, PlanDocument, RemediationOutcome, Runbook
 from .remote import REMOTE_SOURCE
-from .ssh import SSHAdapter
+from .ssh import SSHAdapter, SSHResult
 from .store import SQLiteStore, canonical_json
 
 _RANK = {"low": 0, "medium": 1, "high": 2}
 _PARAM_REF = re.compile(r"^\$param\.([a-z][a-z0-9_]*)$")
+
+
+class ActionExecutor(Protocol):
+    def execute(
+        self, host: Any, action: str, arguments: dict[str, Any], timeout_seconds: int
+    ) -> SSHResult: ...
 
 
 @dataclass(frozen=True)
@@ -164,6 +170,23 @@ def validate_runbook(runbook: Runbook) -> None:
         raise ConfigurationError(
             f"declared runbook risk {runbook.metadata.risk} is lower than action risk"
         )
+    mutable = [step for step in runbook.steps if not REGISTRY[step.action].read_only]
+    if mutable:
+        if len(runbook.targets) != 1:
+            raise ConfigurationError("remediation runbooks must target exactly one host")
+        if len(mutable) != 1 or len(runbook.steps) != 1:
+            raise ConfigurationError(
+                "a remediation runbook must contain exactly one registered mutable step"
+            )
+        if not runbook.preflight or not runbook.postflight:
+            raise ConfigurationError(
+                "remediation requires read-only preflight and postflight checks"
+            )
+        for phase in (runbook.preflight, runbook.postflight):
+            if any(not step.verify for step in phase):
+                raise ConfigurationError(
+                    "every remediation preflight and postflight step requires assertions"
+                )
 
 
 def _source_hashes(runbook_path: Path, paths: Paths) -> dict[str, str]:
@@ -174,7 +197,16 @@ def _source_hashes(runbook_path: Path, paths: Paths) -> dict[str, str]:
         "remote_dispatcher": hashlib.sha256(REMOTE_SOURCE.encode()).hexdigest(),
         "core_modules": {
             name: hashlib.sha256(Path(__file__).with_name(f"{name}.py").read_bytes()).hexdigest()
-            for name in ("actions", "config", "engine", "models", "remote", "ssh")
+            for name in (
+                "actions",
+                "cli",
+                "config",
+                "engine",
+                "models",
+                "remote",
+                "ssh",
+                "store",
+            )
         },
         "actions": [
             {
@@ -212,9 +244,12 @@ def _plan_hash(document: dict[str, Any]) -> str:
 
 
 class RunbookEngine:
-    def __init__(self, paths: Paths) -> None:
+    def __init__(self, paths: Paths, executor: ActionExecutor | None = None) -> None:
         self.paths = paths
         self.store = SQLiteStore(paths.database)
+        # Executor injection is for isolated tests/embedded callers only. The CLI
+        # never accepts an executor from user input and defaults to strict OpenSSH.
+        self._executor = executor
 
     def plan(self, runbook_path: Path, supplied: dict[str, Any] | None = None) -> PlanDocument:
         runbook_path = runbook_path.expanduser().resolve()
@@ -363,22 +398,118 @@ class RunbookEngine:
         if not self.store.plan_hash_is_audited(plan.plan_id, plan.plan_hash):
             raise PolicyDenied("plan does not match its immutable audit event; refusing execution")
 
-    def execute(self, plan_id: str, diagnostic_only: bool = False) -> tuple[str, str]:
+    def remediation_preview(self, plan_id: str) -> dict[str, Any]:
+        plan = PlanDocument.model_validate(self.store.get_plan(plan_id))
+        self._verify_plan(plan)
+        mutable = [item for item in plan.actions if not item.read_only]
+        if plan.status != "approval_required" or len(mutable) != 1:
+            raise PolicyDenied("preview requires an allowed plan with exactly one mutable action")
+        action = mutable[0]
+        definition = REGISTRY[action.action]
+        policy, _ = load_policy(self.paths.policy)
+        inventory, _ = load_inventory(self.paths.inventory)
+        self._verify_plan(plan)
+        host = inventory.hosts[action.target]
+        host_policy = policy.hosts.get(action.target)
+        return {
+            "plan_id": plan.plan_id,
+            "plan_hash": plan.plan_hash,
+            "target": {
+                "alias": action.target,
+                "address": host.address,
+                "port": host.port,
+                "user": host.user,
+            },
+            "action_id": action.action,
+            "parameters": action.arguments,
+            "implementation_fingerprint": plan.source_hashes["implementation"],
+            "read_only_preconditions": [
+                {
+                    "step_id": item.step_id,
+                    "action_id": item.action,
+                    "parameters": item.arguments,
+                    "assertions": [assertion.model_dump() for assertion in item.verify],
+                    "policy": item.reason,
+                }
+                for item in plan.actions
+                if item.phase == "preflight"
+            ],
+            "policy": {
+                "decision": action.reason,
+                "allowed": action.allowed,
+                "action_allowed_for_target": bool(
+                    host_policy and action.action in host_policy.remediation_actions
+                ),
+                "unit_allowed_for_target": bool(
+                    host_policy and action.arguments.get("unit") in host_policy.allowed_units
+                ),
+                "approval_required": action.approval_required,
+            },
+            "expected_service_impact": definition.expected_impact,
+            "approval": {
+                "one_time": True,
+                "expires_after_policy_ttl_seconds": policy.approval.ttl_seconds,
+            },
+            "explicit_execution_confirmation_required": True,
+            "postflight_checks": [
+                {
+                    "step_id": item.step_id,
+                    "action_id": item.action,
+                    "parameters": item.arguments,
+                    "assertions": [assertion.model_dump() for assertion in item.verify],
+                }
+                for item in plan.actions
+                if item.phase == "postflight"
+            ],
+            "rollback": {
+                "available": definition.rollback_available,
+                "limitations": definition.rollback,
+            },
+        }
+
+    def execute(
+        self,
+        plan_id: str,
+        diagnostic_only: bool = False,
+        confirm_remediation: bool = False,
+        confirming_actor: str | None = None,
+    ) -> tuple[str, str]:
         plan = PlanDocument.model_validate(self.store.get_plan(plan_id))
         self._verify_plan(plan)
         if plan.status == "denied":
             raise PolicyDenied("plan contains denied actions; no steps were executed")
         if diagnostic_only and any(not item.read_only for item in plan.actions):
             raise PolicyDenied("check command accepts read-only runbooks only")
+        mutable_actions = [item for item in plan.actions if not item.read_only]
+        if mutable_actions and (not confirm_remediation or not confirming_actor):
+            raise PolicyDenied(
+                "remediation requires explicit execution confirmation and a trusted operator identity"
+            )
         approval_id = None
         if plan.status == "approval_required":
             approval_id = self.store.consume_approval(plan.plan_id, plan.plan_hash)
         inventory, _ = load_inventory(self.paths.inventory)
-        profiles, _ = load_ssh_profiles(self.paths.ssh_profiles, resolve_paths=True)
-        adapter = SSHAdapter(profiles)
+        if self._executor is None:
+            profiles, _ = load_ssh_profiles(self.paths.ssh_profiles, resolve_paths=True)
+            adapter: ActionExecutor = SSHAdapter(profiles)
+        else:
+            adapter = self._executor
         execution_id = str(uuid.uuid4())
         started = now()
-        self.store.start_execution(execution_id, plan.plan_id, started)
+        authorization = None
+        if mutable_actions:
+            authorization = {
+                "approval_id": approval_id,
+                "confirmed_by": confirming_actor,
+                "confirmation": "explicit CLI --confirm",
+            }
+        self.store.start_execution(
+            execution_id,
+            plan.plan_id,
+            started,
+            authorization,
+            RemediationOutcome.NOT_EXECUTED.value if mutable_actions else None,
+        )
         statuses: list[str] = []
         summary: dict[str, Any] = {
             "plan_id": plan.plan_id,
@@ -386,9 +517,15 @@ class RunbookEngine:
             "completed_steps": 0,
         }
         final_status = "succeeded"
+        remediation_outcome = RemediationOutcome.NOT_EXECUTED
+        mutation_attempted = False
+        mutation_state: str | None = None
+        postflight_verified = False
+        verified_postflight_failure = False
         for item in plan.actions:
             action = item.model_dump()
             step_start = now()
+            is_mutation = not item.read_only
             try:
                 arguments = dict(item.arguments)
                 endpoint_id = arguments.get("endpoint_id")
@@ -397,6 +534,17 @@ class RunbookEngine:
                     if endpoint is None:
                         raise PolicyDenied("probe endpoint disappeared after planning")
                     arguments["_endpoint"] = endpoint.model_dump()
+                if is_mutation:
+                    mutation_attempted = True
+                    if approval_id is None:
+                        raise PolicyDenied("mutable action has no consumed approval")
+                    self.store.mark_remediation_dispatch(
+                        execution_id,
+                        plan.plan_id,
+                        item.target,
+                        item.action,
+                        approval_id,
+                    )
                 result = adapter.execute(
                     inventory.hosts[item.target], item.action, arguments, item.timeout_seconds
                 )
@@ -423,18 +571,62 @@ class RunbookEngine:
                         if any(not check["passed"] for check in assertion_results)
                         else "succeeded"
                     )
+                if is_mutation and mutation_attempted:
+                    mutation_state = state
+                if item.phase == "postflight":
+                    postflight_verified = state == "succeeded"
+                    verified_postflight_failure = state == "failed" and any(
+                        check.get("passed") is False for check in evidence.get("assertions", [])
+                    )
             except ExecutionUnknown as exc:
                 evidence = {"ok": False, "error": str(exc), "outcome": "unknown", "retry": False}
                 state = "unknown"
+                if is_mutation:
+                    mutation_state = "unknown"
+            except ConfigurationError as exc:
+                evidence = {"ok": False, "error": f"ConfigurationError: {exc}"}
+                state = "failed"
+                if is_mutation:
+                    mutation_attempted = False
+                    mutation_state = None
             except Exception as exc:
                 evidence = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
-                state = "failed"
+                state = "unknown" if is_mutation else "failed"
+                if is_mutation:
+                    mutation_state = "unknown"
             self.store.record_step(execution_id, action, state, step_start, now(), evidence)
             statuses.append(state)
             summary["completed_steps"] += 1
             if state in {"failed", "unknown"}:
                 final_status = state
+                if is_mutation:
+                    if mutation_attempted:
+                        mutation_state = state
+                    if state == "failed" and mutation_attempted:
+                        # A definite negative action response is followed by the
+                        # registered read-only postflight to establish observed state.
+                        continue
+                if item.phase == "postflight" and state == "failed":
+                    verified_postflight_failure = any(
+                        check.get("passed") is False for check in evidence.get("assertions", [])
+                    )
                 break
+        if mutable_actions:
+            if not mutation_attempted:
+                remediation_outcome = RemediationOutcome.NOT_EXECUTED
+            elif mutation_state == "unknown" or final_status == "unknown":
+                remediation_outcome = RemediationOutcome.UNKNOWN
+            elif verified_postflight_failure or mutation_state == "failed":
+                remediation_outcome = RemediationOutcome.VERIFIED_FAILURE
+            elif (
+                mutation_state == "succeeded"
+                and postflight_verified
+                and final_status == "succeeded"
+            ):
+                remediation_outcome = RemediationOutcome.VERIFIED_SUCCESS
+            else:
+                remediation_outcome = RemediationOutcome.UNKNOWN
+            summary["remediation_outcome"] = remediation_outcome.value
         summary["step_statuses"] = statuses
         self.store.finish_execution(execution_id, final_status, now(), summary)
         return execution_id, final_status

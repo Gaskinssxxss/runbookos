@@ -327,14 +327,74 @@ class SQLiteStore:
             db.commit()
         return row["approval_id"]
 
-    def start_execution(self, execution_id: str, plan_id: str, started_at: str) -> None:
+    def start_execution(
+        self,
+        execution_id: str,
+        plan_id: str,
+        started_at: str,
+        authorization: dict[str, Any] | None = None,
+        remediation_outcome: str | None = None,
+    ) -> None:
         with self._connection() as db:
             db.execute("BEGIN IMMEDIATE")
             db.execute(
-                "INSERT INTO executions(execution_id,plan_id,status,started_at) VALUES(?,?,?,?)",
-                (execution_id, plan_id, "running", started_at),
+                "INSERT INTO executions(execution_id,plan_id,status,started_at,summary_json) VALUES(?,?,?,?,?)",
+                (
+                    execution_id,
+                    plan_id,
+                    "running",
+                    started_at,
+                    canonical_json(
+                        {"remediation_outcome": remediation_outcome} if remediation_outcome else {}
+                    ),
+                ),
             )
-            self._audit(db, "execution.started", {"execution_id": execution_id, "plan_id": plan_id})
+            payload = {"execution_id": execution_id, "plan_id": plan_id}
+            if authorization is not None:
+                # `authorization` is a globally redacted key name; use an
+                # explicitly safe audit label so actor and approval binding persist.
+                payload["operator_confirmation"] = authorization
+            self._audit(db, "execution.started", payload)
+            db.commit()
+
+    def mark_remediation_dispatch(
+        self,
+        execution_id: str,
+        plan_id: str,
+        target: str,
+        action: str,
+        approval_id: str,
+    ) -> None:
+        """Persist UNKNOWN before crossing the mutating transport boundary."""
+        with self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT status,summary_json FROM executions WHERE execution_id=? AND plan_id=?",
+                (execution_id, plan_id),
+            ).fetchone()
+            if not row or row["status"] != "running":
+                db.rollback()
+                raise ConfigurationError("remediation execution is not in a dispatchable state")
+            summary = json.loads(row["summary_json"])
+            if summary.get("remediation_outcome") != "NOT_EXECUTED":
+                db.rollback()
+                raise ConfigurationError("remediation dispatch boundary was already crossed")
+            summary["remediation_outcome"] = "UNKNOWN"
+            db.execute(
+                "UPDATE executions SET summary_json=? WHERE execution_id=?",
+                (canonical_json(summary), execution_id),
+            )
+            self._audit(
+                db,
+                "remediation.dispatching",
+                {
+                    "execution_id": execution_id,
+                    "plan_id": plan_id,
+                    "target": target,
+                    "action": action,
+                    "approval_id": approval_id,
+                },
+            )
             db.commit()
 
     def record_step(
@@ -389,6 +449,19 @@ class SQLiteStore:
                 (status, finished_at, canonical_json(clean), execution_id),
             )
             self._audit(db, "execution." + status, {"execution_id": execution_id, "summary": clean})
+            if "remediation_outcome" in clean:
+                self._audit(
+                    db,
+                    "remediation.outcome",
+                    {
+                        "execution_id": execution_id,
+                        "plan_id": db.execute(
+                            "SELECT plan_id FROM executions WHERE execution_id=?",
+                            (execution_id,),
+                        ).fetchone()["plan_id"],
+                        "outcome": clean["remediation_outcome"],
+                    },
+                )
             db.commit()
 
     def history(self, limit: int = 50) -> list[dict[str, Any]]:
