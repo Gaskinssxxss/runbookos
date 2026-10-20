@@ -6,6 +6,7 @@ import json
 import os
 import re
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
@@ -105,18 +106,30 @@ def test_authenticated_dashboard_lifecycle_csrf_xss_and_restart(tmp_path: Path) 
     incident_store = IncidentStore(SQLiteStore(database))
     created = incident_store.ingest(parse_alert(json.dumps(_alert()).encode()))
     incident_id = created["incident_id"]
+    incident_store.ingest(
+        parse_alert(
+            json.dumps(
+                _alert("bounded-" + "x" * 900)
+                | {"alert_id": "dash-alert-long", "fingerprint": "dash-long"}
+            ).encode()
+        )
+    )
+    # Model a legacy event row created before transition fields were recorded.
+    with sqlite3.connect(database) as db:
+        db.execute(
+            "UPDATE incident_events SET from_status=NULL,to_status=NULL WHERE incident_id=?",
+            (incident_id,),
+        )
     auth_file = tmp_path / "dashboard-auth.json"
     create_auth_file(auth_file, "trusted-operator", "sample-login-phrase-123")
 
-    port = 0
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
     env = os.environ.copy()
     env["PYTHONPATH"] = str(ROOT / "src")
 
     def start() -> subprocess.Popen[bytes]:
-        nonlocal port
-        with socket.socket() as probe:
-            probe.bind(("127.0.0.1", 0))
-            port = probe.getsockname()[1]
         process = subprocess.Popen(
             [
                 sys.executable,
@@ -182,6 +195,15 @@ def test_authenticated_dashboard_lifecycle_csrf_xss_and_restart(tmp_path: Path) 
         assert status == 200
         assert "&lt;script&gt;alert(1)&lt;/script&gt;" in detail
         assert "<script>alert(1)</script>" not in detail
+        assert "— → —" in detail  # Older/non-transition event details remain renderable.
+        status, _, queue = request("GET", "/", cookie=cookie)
+        assert status == 200
+        assert "synthetic-monitor" in queue
+        assert "&lt;script&gt;alert(1)&lt;/script&gt;" in queue
+        assert "<script>alert(1)</script>" not in queue
+        assert "<th>Source</th>" in queue and "<th>Summary</th>" in queue
+        assert "bounded-" + "x" * 230 in queue
+        assert "x" * 240 not in queue
         csrf = re.search(r"name='csrf' value='([^']+)'", detail)
         assert csrf
 
@@ -201,6 +223,8 @@ def test_authenticated_dashboard_lifecycle_csrf_xss_and_restart(tmp_path: Path) 
         acknowledged = incident_store.show(incident_id)
         assert acknowledged["status"] == "ACKNOWLEDGED"
         assert acknowledged["events"][-1]["actor"] == "trusted-operator"
+        status, _, detail = request("GET", f"/incidents/{incident_id}", cookie=cookie)
+        assert status == 200 and "NEW → ACKNOWLEDGED" in detail
 
         # The UI does not accept user-supplied evidence references and cannot skip a state.
         status, _, _ = request(
@@ -271,7 +295,7 @@ def test_authenticated_dashboard_lifecycle_csrf_xss_and_restart(tmp_path: Path) 
             == "ACKNOWLEDGED"
         )
     finally:
-        process.terminate()
+        process.send_signal(2)  # SIGINT exercises the server's orderly close path.
         process.wait(timeout=5)
 
     # Restart invalidates the session but preserves the incident and audit history.
@@ -285,7 +309,7 @@ def test_authenticated_dashboard_lifecycle_csrf_xss_and_restart(tmp_path: Path) 
         valid, count = SQLiteStore(database).verify_audit_chain()
         assert valid and count >= 5
     finally:
-        process.terminate()
+        process.send_signal(2)
         process.wait(timeout=5)
 
 
@@ -294,3 +318,28 @@ def test_dashboard_rejects_non_loopback_bind() -> None:
 
     with pytest.raises(ValueError, match="fixed to 127.0.0.1"):
         serve_dashboard(Path("unused.sqlite"), Path("unused-auth.json"), host="0.0.0.0")
+
+
+def test_dashboard_rejects_occupied_port_without_disturbing_listener() -> None:
+    from http.server import BaseHTTPRequestHandler
+
+    from runbookos.dashboard import _Server
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            self.send_response(204)
+            self.end_headers()
+
+    with socket.socket() as occupied:
+        occupied.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        occupied.bind(("127.0.0.1", 0))
+        occupied.listen(1)
+        address = occupied.getsockname()
+        with pytest.raises(OSError):
+            _Server(address, Handler)
+        # The failed bind must not close or otherwise replace the unrelated listener.
+        occupied.settimeout(0.1)
+        client = socket.create_connection(address, timeout=1)
+        conn, _ = occupied.accept()
+        client.close()
+        conn.close()

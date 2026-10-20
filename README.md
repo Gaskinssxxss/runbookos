@@ -1,4 +1,4 @@
-# RunbookOS v0.4.0 — Secure Operator Dashboard MVP
+# RunbookOS v0.4.1 — Secure Operator Dashboard
 
 Development branch: `feat/v0.4.0-operator-dashboard`, based on the v0.3.2 integrated operations baseline. This is a local-first operator dashboard MVP, not a production release.
 
@@ -31,9 +31,9 @@ python3 scripts/staging-v032.py stop
 
 Generated state is retained under the ignored `.runbookos-staging-v032/` directory. The launcher binds only `127.0.0.1`, refuses to overwrite existing staging data, and does not install a service. See [`docs/staging-acceptance-v0.3.2.md`](docs/staging-acceptance-v0.3.2.md) and [`docs/approval-manifest-v0.3.2.yml`](docs/approval-manifest-v0.3.2.yml). The separate real Alertmanager synthetic acceptance is summarized in [`docs/alertmanager-acceptance-summary-v0.3.2.md`](docs/alertmanager-acceptance-summary-v0.3.2.md); fixture tests do not imply live SSH, Qwen inference, or operational deployment.
 
-## v0.4.0 operator dashboard
+## v0.4.1 operator dashboard patch
 
-The optional dashboard is disabled until explicitly started. It reuses the incident store and lifecycle transitions, binds only to `127.0.0.1`, requires an authenticated operator session, and applies CSRF checks to lifecycle POSTs. It supports incident filtering/detail, alert correlation, timeline, linked investigation/evidence-reference overview, audit-chain status, acknowledgment, resolution, and closure. Investigation execution remains an explicit CLI operation. The dashboard does not execute SSH, AI, runbooks, or remediation.
+The optional dashboard is disabled until explicitly started. It reuses the incident store and lifecycle transitions, binds only to `127.0.0.1`, requires an authenticated operator session, and applies CSRF checks to lifecycle POSTs. It supports incident filtering/detail, alert correlation, timeline with status transitions, bounded queue summaries and source, linked investigation/evidence-reference overview, audit-chain status, acknowledgment, resolution, and closure. Investigation execution remains an explicit CLI operation. The dashboard does not execute SSH, AI, runbooks, or remediation. See [`docs/dashboard-patch-v0.4.1.md`](docs/dashboard-patch-v0.4.1.md).
 
 Initialize a local password verifier and start the foreground listener:
 

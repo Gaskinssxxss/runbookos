@@ -31,5 +31,6 @@ include docs/implementation-report-v0.4.0.md
 include docs/dashboard-staging-approval-v0.4.0.yml
 include docs/dashboard-staging-acceptance-v0.4.0.md
 include docs/release-review-v0.4.0.md
+include docs/dashboard-patch-v0.4.1.md
 include docs/release-staging-manifest-v0.4.0.md
 include docs/staging-acceptance-v0.3.2.md

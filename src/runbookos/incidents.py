@@ -582,7 +582,7 @@ class IncidentStore:
             raise ValueError("invalid incident status")
         with self.store._connection() as db:
             rows = db.execute(
-                "SELECT incident_id,severity,target_alias,service,category,status,created_at,updated_at FROM incidents WHERE (? IS NULL OR status=?) ORDER BY updated_at DESC LIMIT ?",
+                "SELECT i.incident_id,i.severity,i.target_alias,i.service,i.category,i.summary,i.status,i.created_at,i.updated_at,COALESCE((SELECT group_concat(DISTINCT a.source) FROM alerts a JOIN incident_alerts ia USING(source,alert_id) WHERE ia.incident_id=i.incident_id),'unknown') AS source FROM incidents i WHERE (? IS NULL OR i.status=?) ORDER BY i.updated_at DESC LIMIT ?",
                 (status, status, limit),
             ).fetchall()
         return [dict(row) for row in rows]

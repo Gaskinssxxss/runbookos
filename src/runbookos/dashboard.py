@@ -199,6 +199,13 @@ def _e(value: object) -> str:
     return html.escape(str(value), quote=True)
 
 
+def _bounded_text(value: object, limit: int = 240) -> str:
+    text = str(value)
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"
+
+
 def _page(title: str, body: str) -> bytes:
     return (
         "<!doctype html><html lang='en'><meta charset='utf-8'>"
@@ -213,8 +220,12 @@ def _page(title: str, body: str) -> bytes:
 
 
 class _Server(ThreadingHTTPServer):
-    daemon_threads = True
-    allow_reuse_address = False
+    # Reuse a recently closed loopback listener, but never use SO_REUSEPORT or
+    # take over an active listener. Non-daemon request threads are joined by
+    # server_close; request sockets have a timeout so shutdown remains bounded.
+    daemon_threads = False
+    block_on_close = True
+    allow_reuse_address = True
     request_queue_size = 16
 
     def __init__(self, address, handler):
@@ -330,13 +341,15 @@ def serve_dashboard(
                                 "updated_at",
                             )
                         )
+                        + f"<td>{_e(row.get('source', 'unknown'))}</td>"
+                        + f"<td>{_e(_bounded_text(row.get('summary', '')))}</td>"
                         + f"<td><a href='/incidents/{quote(row['incident_id'])}'>Open</a></td></tr>"
                         for row in rows
                     )
-                    or "<tr><td colspan='6'>No matching incidents.</td></tr>"
+                    or "<tr><td colspan='8'>No matching incidents.</td></tr>"
                 )
                 filters = f"<form><select name='status'><option value=''>All states</option>{''.join(f'<option {_selected(status, item)}>{item}</option>' for item in ('NEW', 'ACKNOWLEDGED', 'INVESTIGATING', 'RESOLVED', 'CLOSED'))}</select><select name='severity'><option value=''>All severity</option>{''.join(f'<option {_selected(severity, item)}>{item}</option>' for item in ('info', 'warning', 'error', 'critical'))}</select><input name='target' value='{_e(target)}' placeholder='Target alias'><button>Filter</button></form>"
-                body = f"<p>Audit chain: <strong>{_e(audit)}</strong></p>{filters}<table><thead><tr><th>Severity</th><th>Status</th><th>Target</th><th>Service</th><th>Updated</th><th></th></tr></thead><tbody>{table}</tbody></table><form method='post' action='/logout'><input type='hidden' name='csrf' value='{_e(session.csrf)}'><button>Sign out</button></form>"
+                body = f"<p>Audit chain: <strong>{_e(audit)}</strong></p>{filters}<table><thead><tr><th>Severity</th><th>Status</th><th>Target</th><th>Service</th><th>Updated</th><th>Source</th><th>Summary</th><th></th></tr></thead><tbody>{table}</tbody></table><form method='post' action='/logout'><input type='hidden' name='csrf' value='{_e(session.csrf)}'><button>Sign out</button></form>"
                 self.send_page(200, "Incident queue", body)
                 return
             if parsed.path.startswith("/incidents/"):
@@ -358,10 +371,15 @@ def serve_dashboard(
                         event_details = json.loads(event["details_json"])
                     except (json.JSONDecodeError, TypeError):
                         event_details = {}
+                    if not isinstance(event_details, dict):
+                        event_details = {}
+                    from_status = event_details.get("from_status", event.get("from_status") or "—")
+                    to_status = event_details.get("to_status", event.get("to_status") or "—")
                     event_rows.append(
                         f"<tr><td>{_e(event['created_at'])}</td><td>{_e(event['event_type'])}</td>"
                         f"<td>{_e(event['actor'])}</td><td>{_e(event['reason'])}</td>"
-                        f"<td>{_e(event_details.get('evidence_status', '—'))}</td></tr>"
+                        f"<td>{_e(event_details.get('evidence_status', '—'))}</td>"
+                        f"<td>{_e(from_status)} → {_e(to_status)}</td></tr>"
                     )
                 events = "".join(event_rows)
                 investigations = []
@@ -376,7 +394,7 @@ def serve_dashboard(
                     f"<article><p><strong>{_e(detail['severity'].upper())}</strong> · {_e(detail['status'])}</p><p>{_e(detail['summary'])}</p>"
                     f"<dl><dt>Target / service</dt><dd>{_e(detail['target_alias'])} / {_e(detail['service'])}</dd><dt>Category</dt><dd>{_e(detail['category'])}</dd><dt>Created / updated</dt><dd>{_e(detail['created_at'])} / {_e(detail['updated_at'])}</dd><dt>Audit chain</dt><dd>{_e(audit)}</dd></dl></article>"
                     f"<h2>Alert correlation</h2><ul>{links}</ul><h2>Linked investigations</h2><ul>{''.join(investigations) or '<li>None</li>'}</ul>"
-                    f"<h2>Incident timeline</h2><table><tr><th>Time</th><th>Event</th><th>Actor</th><th>Reason</th><th>Evidence status</th></tr>{events}</table>{controls}"
+                    f"<h2>Incident timeline</h2><table><tr><th>Time</th><th>Event</th><th>Actor</th><th>Reason</th><th>Evidence status</th><th>Status transition</th></tr>{events}</table>{controls}"
                 )
                 self.send_page(200, f"Incident {incident_id}", body)
                 return
