@@ -18,6 +18,7 @@ from .ai import (
 )
 from .blind_review import export_blind_review, reviewer_agreement
 from .config import load_inventory, load_runbook, load_ssh_profiles
+from .dashboard import create_auth_file, serve_dashboard
 from .engine import Paths, RunbookEngine, validate_runbook
 from .errors import RunbookOSError
 from .evaluation import (
@@ -73,9 +74,11 @@ app.add_typer(evaluation_app, name="evaluation")
 alerts_app = typer.Typer(no_args_is_help=True, help="Ingest and inspect alert events.")
 incidents_app = typer.Typer(no_args_is_help=True, help="Manage human-controlled incidents.")
 webhook_app = typer.Typer(no_args_is_help=True, help="Run the optional loopback alert webhook.")
+dashboard_app = typer.Typer(no_args_is_help=True, help="Run the optional local operator dashboard.")
 app.add_typer(alerts_app, name="alerts")
 app.add_typer(incidents_app, name="incidents")
 app.add_typer(webhook_app, name="webhook")
+app.add_typer(dashboard_app, name="dashboard")
 
 
 def _path(value: Path) -> Path:
@@ -622,6 +625,38 @@ def webhook_serve(
         )
     except KeyboardInterrupt:
         raise typer.Exit(130) from None
+    except Exception as exc:
+        _fail(exc)
+
+
+@dashboard_app.command("auth-init")
+def dashboard_auth_init(
+    operator_id: str = typer.Option(
+        ..., "--operator-id", help="Trusted operator identity recorded in audit."
+    ),
+    auth_file: Path = typer.Option(
+        ..., "--auth-file", help="New local verifier file; must not already exist."
+    ),
+) -> None:
+    """Interactively create a protected password verifier for dashboard sessions."""
+    try:
+        password = typer.prompt("Dashboard password", hide_input=True, confirmation_prompt=True)
+        create_auth_file(auth_file, operator_id, password)
+        typer.echo(f"Created protected dashboard auth file: {auth_file}")
+    except Exception as exc:
+        _fail(exc)
+
+
+@dashboard_app.command("serve")
+def dashboard_serve(
+    ctx: typer.Context,
+    auth_file: Path = typer.Option(..., "--auth-file", exists=True, dir_okay=False),
+    host: str = typer.Option("127.0.0.1", help="Loopback only; other values are rejected."),
+    port: int = typer.Option(8780, min=1, max=65535),
+) -> None:
+    """Start the optional foreground dashboard; Ctrl-C stops it."""
+    try:
+        serve_dashboard(ctx.obj.database, _path(auth_file), host=host, port=port)
     except Exception as exc:
         _fail(exc)
 

@@ -1,5 +1,7 @@
 # RunbookOS v0.3.2 — Staging Acceptance
 
+Historical scope note: the real Alertmanager, real monitoring-source, and operational-deployment rows below record the status when this v0.3.2 walkthrough was written. A later authorized real Alertmanager v0.34.1 synthetic-process acceptance passed; see [`alertmanager-acceptance-summary-v0.3.2.md`](alertmanager-acceptance-summary-v0.3.2.md). The later test does not change the “real monitoring-generated alert” or operational-deployment status.
+
 ## Evidence classification
 
 | Acceptance layer | Result | Evidence |

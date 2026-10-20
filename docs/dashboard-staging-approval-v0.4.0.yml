@@ -1,0 +1,100 @@
+schema_version: 1
+status: pending_operator_approval
+purpose: >-
+  Request permission for a temporary integrated dashboard acceptance using the existing,
+  isolated v0.3.2 loopback Alertmanager bridge/webhook and an additional synthetic alert.
+repository: current RunbookOS Git worktree root
+staging_root: .runbookos-staging-v032/
+preflight_observed:
+  bridge_process: stopped
+  webhook_process: stopped
+  isolated_database_exists: true
+  isolated_database_permissions: "0600"
+  operational_database_use: false
+requested_processes:
+  - name: existing staging webhook
+    executable: .runbookos-staging-v032/venv/bin/runbookos
+    listen: 127.0.0.1:8765/tcp
+    lifecycle: start only if both bridge and webhook are stopped at preflight; stop only the processes started by this acceptance
+    configuration: existing staging inventory, policy, SSH profiles, and webhook auth; no edits
+  - name: existing staging signing bridge
+    executable: .runbookos-staging-v032/venv/bin/python -m runbookos.adapters.alertmanager_bridge
+    listen: 127.0.0.1:8764/tcp
+    lifecycle: start only if both bridge and webhook are stopped at preflight; stop only the processes started by this acceptance
+    credentials: use existing isolated staging environment without displaying or changing values
+  - name: dashboard
+    executable: .runbookos-staging-v032/dashboard-venv/bin/runbookos
+    listen: 127.0.0.1:8780/tcp
+    lifecycle: temporary foreground process; stop with Ctrl-C
+    database: .runbookos-staging-v032/state/runbookos.sqlite3
+    inventory: .runbookos-staging-v032/config/inventory.yml
+    policy: .runbookos-staging-v032/config/policy.yml
+    ssh_profiles: .runbookos-staging-v032/config/ssh_profiles.yml
+    auth_verifier: .runbookos-staging-v032/run/dashboard-auth-v040.json
+requested_files:
+  create:
+    - path: .runbookos-staging-v032/dashboard-venv/
+      contents: isolated virtual environment for RunbookOS v0.4.0 dashboard only
+    - path: .runbookos-staging-v032/artifacts/
+      contents: staging-local wheel build output directory
+    - path: .runbookos-staging-v032/artifacts/runbookos-0.4.0-py3-none-any.whl
+      contents: locally built v0.4.0 wheel; no source or credentials embedded
+    - path: .runbookos-staging-v032/run/dashboard-auth-v040.json
+      mode: "0600"
+      contents: PBKDF2 verifier only; password entered interactively and never stored
+  dependency_downloads:
+    source: configured Python package index
+    allowed_requirements:
+      - pydantic>=2.7,<3
+      - PyYAML>=6,<7
+      - typer>=0.12,<1
+    constraint: >-
+      install only the local wheel's declared runtime dependencies and their transitive dependencies;
+      no development dependencies or other packages
+  append_or_update:
+    - path: .runbookos-staging-v032/logs/webhook.log
+      contents: process output; may append during startup and shutdown
+    - path: .runbookos-staging-v032/logs/bridge.log
+      contents: process output; may append during startup and shutdown
+    - path: .runbookos-staging-v032/run/webhook.pid
+    - path: .runbookos-staging-v032/run/bridge.pid
+database_effects:
+  database: .runbookos-staging-v032/state/runbookos.sqlite3
+  expected: >-
+    One new synthetic incident; one firing alert row plus one resolved-notification alert row;
+    duplicate firing delivery adds replay nonce/audit evidence but no additional alert or incident;
+    alert links and lifecycle/audit events. No existing incident is transitioned or edited.
+  execution_rows: 0
+  investigation_rows: 0
+  ssh_ai_remediation: none
+synthetic_delivery:
+  sender: local in-memory Python harness via 127.0.0.1:8764/api/v2/alerts
+  payload: Alertmanager v2-shaped synthetic firing, duplicate firing, and resolved update
+  target_alias: example-web-01
+  service: nginx
+  source_identity: existing authenticated staging source alertmanager-staging
+  no_real_alertmanager_process: true
+operator_actions:
+  - authenticated dashboard login
+  - acknowledge new synthetic incident with reason
+  - harness-only audited transition to INVESTIGATING without running diagnostics, solely to exercise the existing RESOLVED transition; this is not evidence of an investigation
+  - resolve with evidence_status not_available and reason
+  - close with reason
+security_boundaries:
+  dashboard_network_exposure: loopback only; no reverse proxy
+  ssh_or_qwen: prohibited
+  remediation: prohibited
+  credentials_or_auth_headers_in_logs: prohibited
+  operational_database: prohibited
+preflight_abort_conditions:
+  - either bridge or webhook is already running; do not stop or adopt an existing process
+  - port 8764, 8765, or 8780 is occupied by an unrecognized process
+  - staging configuration, executable, database, or credential files differ from the reviewed isolated paths
+  - dashboard-venv, artifacts/, or dashboard-auth-v040.json already exists; do not overwrite
+cleanup:
+  - stop dashboard with Ctrl-C
+  - run scripts/staging-v032.py stop only after confirming this acceptance started bridge and webhook from a stopped preflight
+  - verify all three loopback listeners and acceptance processes are stopped
+  - preserve staging SQLite, prior records, and logs
+  - optionally remove only dashboard-auth-v040.json created by this acceptance after verifying exact path; never delete existing staging credentials
+  - verify audit chain after cleanup

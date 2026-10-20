@@ -1,6 +1,6 @@
-# RunbookOS v0.3.2 — Integrated Operations MVP
+# RunbookOS v0.4.0 — Secure Operator Dashboard MVP
 
-Development branch: `feat/v0.3.2-integrated-operations`. v0.3.1 remains the last stable development baseline. This branch is a local staging MVP, not a production release.
+Development branch: `feat/v0.4.0-operator-dashboard`, based on the v0.3.2 integrated operations baseline. This is a local-first operator dashboard MVP, not a production release.
 
 RunbookOS is a lightweight Python CLI for validating, planning, running, and auditing Linux operational runbooks, with optional AI-assisted incident investigation and human-controlled alert-to-incident workflow. It uses versioned YAML/JSON, Pydantic, Typer, SQLite, OpenSSH, and a replaceable provider interface with one OpenAI-compatible HTTP implementation. The optional webhook is disabled unless started manually and binds only to loopback. There is no autonomous remediation loop.
 
@@ -29,7 +29,21 @@ python3 scripts/staging-v032.py status
 python3 scripts/staging-v032.py stop
 ```
 
-Generated state is retained under the ignored `.runbookos-staging-v032/` directory. The launcher binds only `127.0.0.1`, refuses to overwrite existing staging data, and does not install a service. See [`docs/staging-acceptance-v0.3.2.md`](docs/staging-acceptance-v0.3.2.md) and [`docs/approval-manifest-v0.3.2.yml`](docs/approval-manifest-v0.3.2.yml). No real Alertmanager, live SSH, Qwen inference, or operational deployment is implied by fixture tests.
+Generated state is retained under the ignored `.runbookos-staging-v032/` directory. The launcher binds only `127.0.0.1`, refuses to overwrite existing staging data, and does not install a service. See [`docs/staging-acceptance-v0.3.2.md`](docs/staging-acceptance-v0.3.2.md) and [`docs/approval-manifest-v0.3.2.yml`](docs/approval-manifest-v0.3.2.yml). The separate real Alertmanager synthetic acceptance is summarized in [`docs/alertmanager-acceptance-summary-v0.3.2.md`](docs/alertmanager-acceptance-summary-v0.3.2.md); fixture tests do not imply live SSH, Qwen inference, or operational deployment.
+
+## v0.4.0 operator dashboard
+
+The optional dashboard is disabled until explicitly started. It reuses the incident store and lifecycle transitions, binds only to `127.0.0.1`, requires an authenticated operator session, and applies CSRF checks to lifecycle POSTs. It supports incident filtering/detail, alert correlation, timeline, linked investigation/evidence-reference overview, audit-chain status, acknowledgment, resolution, and closure. Investigation execution remains an explicit CLI operation. The dashboard does not execute SSH, AI, runbooks, or remediation.
+
+Initialize a local password verifier and start the foreground listener:
+
+```sh
+runbookos dashboard auth-init --operator-id alice --auth-file ~/.config/runbookos/dashboard-auth.json
+runbookos --db ~/.local/state/runbookos/runbookos.sqlite3 dashboard serve \
+  --auth-file ~/.config/runbookos/dashboard-auth.json --port 8780
+```
+
+Open `http://127.0.0.1:8780/`. The auth verifier must be a regular file owned by the current account with no group/other permissions. Sessions are memory-only and end on process restart. The listener is plain HTTP on loopback; do not expose it through a network proxy. See [`docs/dashboard-security-v0.4.0.md`](docs/dashboard-security-v0.4.0.md).
 
 ## Install
 
