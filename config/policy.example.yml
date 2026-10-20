@@ -1,0 +1,31 @@
+schema_version: 1
+default_decision: deny
+approval:
+  required_for_remediation: true
+  ttl_seconds: 900
+  one_time: true
+hosts:
+  example-web-01:
+    diagnostic_actions:
+      - systemd.is_active
+      - systemd.failed_units
+      - os.uptime
+      - os.memory
+      - os.disk
+      - network.interfaces
+      - network.routes
+    remediation_actions: []
+    allowed_units:
+      - nginx.service
+  example-app-01:
+    diagnostic_actions: [systemd.is_active, systemd.failed_units, os.uptime, os.memory, os.disk]
+    remediation_actions: []
+    allowed_units: [runbookos-sample.service]
+  example-db-01:
+    diagnostic_actions: [systemd.is_active, systemd.failed_units, os.uptime, os.memory, os.disk]
+    remediation_actions: []
+    allowed_units: [postgresql.service]
+  example-net-01:
+    diagnostic_actions: [systemd.is_active, systemd.failed_units, network.interfaces, network.routes]
+    remediation_actions: []
+    allowed_units: [nftables.service]

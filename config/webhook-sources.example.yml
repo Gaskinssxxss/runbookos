@@ -1,0 +1,15 @@
+schema_version: 1
+mode: per_source
+max_timestamp_skew_seconds: 300
+sources:
+  alertmanager-prod:
+    enabled: true
+    active_key_id: am-2026-10
+    keys:
+      am-2026-10:
+        secret_env: RUNBOOKOS_HMAC_ALERTMANAGER_2026_10 # pragma: allowlist secret - environment variable name, not a credential
+        state: active
+      am-2026-09:
+        secret_env: RUNBOOKOS_HMAC_ALERTMANAGER_2026_09 # pragma: allowlist secret - environment variable name, not a credential
+        state: grace
+        expires_at: "2026-11-01T00:00:00Z"

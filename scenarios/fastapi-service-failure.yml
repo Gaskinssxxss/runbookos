@@ -1,0 +1,32 @@
+schema_version: 1
+incident_id: fastapi-service-failure
+name: FastAPI service failure
+target: example-app-01
+service: runbookos-sample
+failure_type: service_failure
+incident: Requests through the web tier fail while the app endpoint is unavailable.
+ground_truth: The FastAPI systemd unit is inactive on the application server.
+expected_classification: service_failure
+expected_root_cause: fastapi_service_inactive
+expected_diagnostics: [application_health]
+available_diagnostics: [web_health, application_health, database_health, network_health]
+expected_evidence_refs: [FX-API-UNIT, FX-API-FAILED]
+evidence:
+  - ref: FX-API-UNIT
+    diagnostic_id: application_health
+    target: example-app-01
+    action: systemd.is_active
+    status: succeeded
+    evidence: {unit: runbookos-sample.service, active: false}
+  - ref: FX-API-FAILED
+    diagnostic_id: application_health
+    target: example-app-01
+    action: systemd.failed_units
+    status: succeeded
+    evidence: {units: [runbookos-sample.service]}
+recovery_criteria: [FastAPI unit is active, application health assertion passes]
+mock_prediction:
+  classification: service_failure
+  root_cause: fastapi_service_inactive
+  evidence_refs: [FX-API-UNIT, FX-API-FAILED]
+  diagnostic_ids: [application_health]

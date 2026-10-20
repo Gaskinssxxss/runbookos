@@ -1,0 +1,161 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from conftest import write_config_tree
+from typer.testing import CliRunner
+
+from runbookos.cli import app
+
+
+def test_cli_check_history_and_audit(tmp_path: Path, key_material, monkeypatch) -> None:
+    private, known_hosts = key_material
+    paths = write_config_tree(tmp_path)
+    bindir = tmp_path / "fake-bin"
+    bindir.mkdir()
+    capture = tmp_path / "remote-command.json"
+    fake_ssh = bindir / "ssh"
+    response = json.dumps(
+        {
+            "ok": True,
+            "data": {"unit": "nginx.service", "active": True},
+            "error": None,
+            "uncertain": False,
+        }
+    )
+    fake_ssh.write_text(
+        "#!/usr/bin/python3\n"
+        "import json,sys\n"
+        f"open({str(capture)!r},'w').write(json.dumps(sys.argv[1:]))\n"
+        f"print({response!r})\n"
+    )
+    fake_ssh.chmod(0o700)
+    monkeypatch.setenv("PATH", str(bindir) + ":/usr/bin:/bin")
+    monkeypatch.setenv("RUNBOOKOS_TEST_KEY", str(private))
+    monkeypatch.setenv("RUNBOOKOS_TEST_KNOWN_HOSTS", str(known_hosts))
+    root_args = [
+        "--inventory",
+        str(paths.inventory),
+        "--policy",
+        str(paths.policy),
+        "--ssh-profiles",
+        str(paths.ssh_profiles),
+        "--db",
+        str(paths.database),
+    ]
+    runner = CliRunner()
+    check_result = runner.invoke(app, root_args + ["check", str(tmp_path / "runbook.yml")])
+    assert check_result.exit_code == 0, check_result.output
+    assert "succeeded" in check_result.output
+    argv = json.loads(capture.read_text())
+    assert "-oStrictHostKeyChecking=yes" in argv
+    assert "-oPasswordAuthentication=no" in argv
+
+    history_result = runner.invoke(app, root_args + ["history"])
+    assert history_result.exit_code == 0, history_result.output
+    history = json.loads(history_result.output)
+    assert len(history) == 1 and history[0]["status"] == "succeeded"
+    execution_id = history[0]["execution_id"]
+    detail = runner.invoke(app, root_args + ["history", execution_id])
+    assert detail.exit_code == 0, detail.output
+    assert json.loads(detail.output)["steps"][0]["evidence"]["data"]["active"] is True
+
+    audit = runner.invoke(app, root_args + ["audit"])
+    assert audit.exit_code == 0, audit.output
+    assert "AUDIT OK" in audit.output
+
+
+def test_approval_command_executes_once_only(tmp_path: Path, key_material, monkeypatch) -> None:
+    private, known_hosts = key_material
+    paths = write_config_tree(tmp_path, remediation=True)
+    bindir = tmp_path / "fake-bin"
+    bindir.mkdir()
+    calls = tmp_path / "calls.txt"
+    fake_ssh = bindir / "ssh"
+    response = json.dumps(
+        {
+            "ok": True,
+            "data": {"unit": "nginx.service", "restarted": True},
+            "error": None,
+            "uncertain": False,
+        }
+    )
+    fake_ssh.write_text(
+        "#!/usr/bin/python3\n"
+        "import json,sys\n"
+        f"open({str(calls)!r},'a').write('called\\n')\n"
+        f"print({response!r})\n"
+    )
+    fake_ssh.chmod(0o700)
+    monkeypatch.setenv("PATH", str(bindir) + ":/usr/bin:/bin")
+    monkeypatch.setenv("RUNBOOKOS_TEST_KEY", str(private))
+    monkeypatch.setenv("RUNBOOKOS_TEST_KNOWN_HOSTS", str(known_hosts))
+    root_args = [
+        "--inventory",
+        str(paths.inventory),
+        "--policy",
+        str(paths.policy),
+        "--ssh-profiles",
+        str(paths.ssh_profiles),
+        "--db",
+        str(paths.database),
+    ]
+    runner = CliRunner()
+    planned = runner.invoke(app, root_args + ["plan", str(tmp_path / "runbook.yml"), "--json"])
+    assert planned.exit_code == 0, planned.output
+    plan_id = json.loads(planned.output)["plan_id"]
+    assert json.loads(planned.output)["status"] == "approval_required"
+    approval = runner.invoke(
+        app, root_args + ["approve", plan_id, "--reason", "Approved isolated fixture test"]
+    )
+    assert approval.exit_code == 0, approval.output
+    executed = runner.invoke(app, root_args + ["run", plan_id])
+    assert executed.exit_code == 0, executed.output
+    assert "succeeded" in executed.output
+    assert calls.read_text().splitlines() == ["called"]
+    replay = runner.invoke(app, root_args + ["run", plan_id])
+    assert replay.exit_code == 2, replay.output
+    assert "no valid, unused approval" in replay.output
+    assert calls.read_text().splitlines() == ["called"]
+
+
+def test_unknown_ssh_result_is_persisted_without_retry(
+    tmp_path: Path, key_material, monkeypatch
+) -> None:
+    private, known_hosts = key_material
+    paths = write_config_tree(tmp_path)
+    bindir = tmp_path / "fake-bin"
+    bindir.mkdir()
+    calls = tmp_path / "calls.txt"
+    fake_ssh = bindir / "ssh"
+    fake_ssh.write_text(
+        "#!/usr/bin/python3\n"
+        "import sys\n"
+        f"open({str(calls)!r},'a').write('called\\n')\n"
+        "raise SystemExit(255)\n"
+    )
+    fake_ssh.chmod(0o700)
+    monkeypatch.setenv("PATH", str(bindir) + ":/usr/bin:/bin")
+    monkeypatch.setenv("RUNBOOKOS_TEST_KEY", str(private))
+    monkeypatch.setenv("RUNBOOKOS_TEST_KNOWN_HOSTS", str(known_hosts))
+    root_args = [
+        "--inventory",
+        str(paths.inventory),
+        "--policy",
+        str(paths.policy),
+        "--ssh-profiles",
+        str(paths.ssh_profiles),
+        "--db",
+        str(paths.database),
+    ]
+    runner = CliRunner()
+    planned = runner.invoke(app, root_args + ["plan", str(tmp_path / "runbook.yml"), "--json"])
+    assert planned.exit_code == 0, planned.output
+    plan_id = json.loads(planned.output)["plan_id"]
+    executed = runner.invoke(app, root_args + ["run", plan_id])
+    assert executed.exit_code == 3, executed.output
+    assert "unknown" in executed.output
+    assert calls.read_text().splitlines() == ["called"]
+    history = runner.invoke(app, root_args + ["history"])
+    assert json.loads(history.output)[0]["status"] == "unknown"

@@ -1,0 +1,7 @@
+schema_version: 1
+profiles:
+  default:
+    identity_file: "${ENV:RUNBOOKOS_SSH_KEY}"
+    known_hosts_file: "${ENV:RUNBOOKOS_KNOWN_HOSTS}"
+    connect_timeout_seconds: 5
+    server_alive_interval_seconds: 5

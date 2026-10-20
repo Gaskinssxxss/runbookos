@@ -1,0 +1,11 @@
+schema_version: 1
+mode: legacy_single_source
+max_timestamp_skew_seconds: 300
+sources:
+  legacy-monitor:
+    enabled: true
+    active_key_id: legacy-v1
+    keys:
+      legacy-v1:
+        secret_env: RUNBOOKOS_HMAC_LEGACY_MONITOR # pragma: allowlist secret - environment variable name, not a credential
+        state: active

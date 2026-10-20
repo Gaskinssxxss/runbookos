@@ -1,0 +1,29 @@
+api_version: runbookos/v1
+kind: Runbook
+metadata:
+  id: application-dependency-readiness
+  name: Application dependency readiness
+  description: Separates dependency TCP reachability, PostgreSQL protocol availability, and HTTP readiness.
+  risk: low
+targets: [example-app-01]
+steps:
+  - id: postgres-tcp-reachable
+    action: network.tcp_connect
+    with: {endpoint_id: postgres_listener}
+    timeout_seconds: 5
+    verify: [{path: data.tcp_connected, operator: is_true}]
+  - id: postgres-protocol-available
+    action: postgresql.protocol_available
+    with: {endpoint_id: postgres_listener}
+    timeout_seconds: 5
+    verify: [{path: data.protocol_available, operator: is_true}]
+  - id: application-network-reachable
+    action: network.reachability
+    with: {endpoint_id: application_readiness}
+    timeout_seconds: 5
+    verify: [{path: data.reachable, operator: is_true}]
+  - id: application-http-readiness
+    action: http.readiness
+    with: {endpoint_id: application_readiness}
+    timeout_seconds: 5
+    verify: [{path: data.ready, operator: is_true}]

@@ -1,0 +1,26 @@
+schema_version: 1
+incident_id: postgresql-connectivity-failure
+name: PostgreSQL connectivity failure
+target: example-db-01
+service: postgresql
+failure_type: connectivity_failure
+incident: The application reports that PostgreSQL is unavailable.
+ground_truth: PostgreSQL systemd unit is inactive, matching the reported connection failure.
+expected_classification: connectivity_failure
+expected_root_cause: postgresql_service_inactive
+expected_diagnostics: [database_health]
+available_diagnostics: [web_health, application_health, database_health, network_health]
+expected_evidence_refs: [FX-PG-UNIT]
+evidence:
+  - ref: FX-PG-UNIT
+    diagnostic_id: database_health
+    target: example-db-01
+    action: systemd.is_active
+    status: succeeded
+    evidence: {unit: postgresql.service, active: false}
+recovery_criteria: [PostgreSQL unit is active, application connection health is verified separately]
+mock_prediction:
+  classification: connectivity_failure
+  root_cause: postgresql_service_inactive
+  evidence_refs: [FX-PG-UNIT]
+  diagnostic_ids: [database_health]

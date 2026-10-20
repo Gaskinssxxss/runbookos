@@ -1,0 +1,26 @@
+api_version: runbookos/v1
+kind: Runbook
+metadata:
+  id: database-server-health
+  name: Database server health
+  description: Read-only PostgreSQL unit and storage checks; does not query or modify application data.
+  risk: low
+targets: [example-db-01]
+preflight:
+  - id: preflight-failed-units
+    action: systemd.failed_units
+    verify: [{path: data.units, operator: empty}]
+steps:
+  - id: postgresql-active
+    action: systemd.is_active
+    with: {unit: postgresql.service}
+    verify: [{path: data.active, operator: is_true}]
+  - id: root-disk-capacity
+    action: os.disk
+    with: {path: /}
+    verify: [{path: data.percent, operator: lte, value: 85}]
+postflight:
+  - id: postgresql-postflight
+    action: systemd.is_active
+    with: {unit: postgresql.service}
+    verify: [{path: data.active, operator: is_true}]

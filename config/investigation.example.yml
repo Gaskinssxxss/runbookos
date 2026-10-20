@@ -1,0 +1,19 @@
+schema_version: 1
+provider:
+  type: openai_compatible
+  # The local llama.cpp server must bind to loopback. This config is optional.
+  base_url: http://127.0.0.1:8080/v1
+  model: qwen3.5-9b-instruct
+  api_key_env: RUNBOOKOS_LLAMA_API_KEY # pragma: allowlist secret - environment variable name, not a credential
+  timeout_seconds: 120
+  max_tokens: 700
+  temperature: 0
+limits:
+  max_diagnostic_runbooks: 2
+  max_tool_calls: 8
+  execution_budget_seconds: 60
+  max_incident_chars: 4000
+catalog:
+  - id: basic_host
+    runbook: ../examples/runbooks/basic-host-health.yml
+    description: Host uptime, memory pressure, root disk capacity, and failed systemd units.

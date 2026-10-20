@@ -1,0 +1,32 @@
+schema_version: 1
+incident_id: healthy-baseline
+name: Healthy service baseline
+target: example-web-01
+service: nginx
+failure_type: healthy
+incident: Users report normal response time and successful requests.
+ground_truth: No fault; Nginx is active and disk capacity is within threshold.
+expected_classification: healthy
+expected_root_cause: no_fault_detected
+expected_diagnostics: [web_health]
+available_diagnostics: [web_health, application_health, database_health, network_health]
+expected_evidence_refs: [FX-WEB-UNIT, FX-WEB-DISK]
+evidence:
+  - ref: FX-WEB-UNIT
+    diagnostic_id: web_health
+    target: example-web-01
+    action: systemd.is_active
+    status: succeeded
+    evidence: {unit: nginx.service, active: true}
+  - ref: FX-WEB-DISK
+    diagnostic_id: web_health
+    target: example-web-01
+    action: os.disk
+    status: succeeded
+    evidence: {path: /, percent: 42, available_bytes: 245000000000}
+recovery_criteria: [Nginx remains active, disk usage remains below 85 percent]
+mock_prediction:
+  classification: healthy
+  root_cause: no_fault_detected
+  evidence_refs: [FX-WEB-UNIT, FX-WEB-DISK]
+  diagnostic_ids: [web_health]

@@ -1,0 +1,15 @@
+{
+  "alert_id": "monitor-2026-001",
+  "source": "example-monitor",
+  "event_timestamp": "2026-10-20T09:00:00Z",
+  "severity": "error",
+  "target_alias": "example-web-01",
+  "service": "nginx",
+  "category": "service",
+  "summary": "Readiness endpoint did not return success",
+  "fingerprint": "nginx-healthz-failure",
+  "metadata": {
+    "check": "healthz",
+    "region": "lab"
+  }
+}

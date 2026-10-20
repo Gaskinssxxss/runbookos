@@ -1,0 +1,30 @@
+schema_version: 1
+hosts:
+  example-web-01:
+    address: 192.0.2.10
+    port: 22
+    user: runbook
+    role: web-server
+    ssh_profile: default
+    host_key_alias: example-web-01
+  example-app-01:
+    address: 192.0.2.11
+    port: 22
+    user: runbook
+    role: application-server
+    ssh_profile: default
+    host_key_alias: example-app-01
+  example-db-01:
+    address: 192.0.2.12
+    port: 22
+    user: runbook
+    role: database-server
+    ssh_profile: default
+    host_key_alias: example-db-01
+  example-net-01:
+    address: 192.0.2.13
+    port: 22
+    user: runbook
+    role: network-gateway
+    ssh_profile: default
+    host_key_alias: example-net-01

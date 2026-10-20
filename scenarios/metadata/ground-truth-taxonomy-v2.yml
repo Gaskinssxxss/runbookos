@@ -1,0 +1,20 @@
+schema_version: 2
+scenarios:
+  healthy-baseline:
+    classification: healthy
+    root_cause_id: rc-000
+  nginx-service-failure:
+    classification: service_failure
+    root_cause_id: rc-100
+  fastapi-service-failure:
+    classification: service_failure
+    root_cause_id: rc-101
+  postgresql-connectivity-failure:
+    classification: dependency_failure
+    root_cause_id: rc-102
+  disk-pressure:
+    classification: resource_pressure
+    root_cause_id: rc-200
+  network-reachability-failure:
+    classification: network_failure
+    root_cause_id: rc-300

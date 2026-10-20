@@ -1,0 +1,26 @@
+schema_version: 1
+incident_id: network-reachability-failure
+name: Network reachability failure
+target: example-net-01
+service: services network route
+failure_type: network_failure
+incident: The gateway does not show the expected route to the services network.
+ground_truth: The expected services-network route is absent from the gateway route table.
+expected_classification: network_failure
+expected_root_cause: services_route_missing
+expected_diagnostics: [network_health]
+available_diagnostics: [web_health, application_health, database_health, network_health]
+expected_evidence_refs: [FX-NET-ROUTES]
+evidence:
+  - ref: FX-NET-ROUTES
+    diagnostic_id: network_health
+    target: example-net-01
+    action: network.routes
+    status: succeeded
+    evidence: {routes: [{destination: 10.250.20.0/24, gateway: null}]}
+recovery_criteria: [Expected gateway route is present, route-table assertion passes]
+mock_prediction:
+  classification: network_failure
+  root_cause: services_route_missing
+  evidence_refs: [FX-NET-ROUTES]
+  diagnostic_ids: [network_health]

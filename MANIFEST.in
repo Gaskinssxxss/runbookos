@@ -1,0 +1,21 @@
+include README.md LICENSE pyproject.toml requirements-ci-py312.lock
+recursive-include src *.py
+recursive-include config *.example.yml
+exclude config/*.homelab.example.yml
+recursive-include examples *.yml *.json
+recursive-include scenarios *.yml
+recursive-include tests *.py
+exclude tests/test_probe_approval_manifest.py
+exclude tests/test_live_*.py
+include docs/architecture.md
+include docs/ai-investigation.md
+include docs/alert-incident-workflow-v0.3.0.md
+include docs/blind-review-v0.2.5.md
+include docs/deployment-recovery-v0.3.1.md
+include docs/diagnostic-actions-v0.2.3.md
+include docs/diagnostic-taxonomy-v2.md
+include docs/incident-evaluation.md
+include docs/operations.md
+include docs/runbook-schema.md
+include docs/security.md
+include docs/webhook-authentication-v0.3.1.md

@@ -1,0 +1,22 @@
+schema_version: 2
+classification:
+  healthy: No fault is supported by the collected evidence and required checks are sufficient.
+  service_failure: The service being checked on the target is inactive, failed, or unable to serve locally.
+  connectivity_failure: An endpoint or protocol cannot be reached, with no evidence identifying a route or local-service cause.
+  network_failure: Evidence identifies a network path, interface, gateway, or route failure.
+  dependency_failure: The application or service depends on another service that is unavailable; the caller may itself be running.
+  resource_pressure: A measured resource is at or beyond an explicitly defined capacity threshold.
+  unknown: Evidence is missing, contradictory, or insufficient to select another class safely.
+root_causes:
+  rc-100: Nginx service unit is inactive or failed.
+  rc-101: FastAPI application service unit is inactive or failed.
+  rc-102: PostgreSQL dependency service is inactive or failed.
+  rc-200: Root filesystem capacity is above the scenario threshold.
+  rc-300: A required route to the services network is absent.
+  rc-000: Required diagnostic evidence indicates the baseline is healthy.
+  rc-999: Available evidence does not establish a root cause.
+diagnostic_catalog:
+  web_health: Checks the web server service and host health.
+  application_health: Checks the application service and host health.
+  database_health: Checks the database service and host health.
+  network_health: Checks interfaces and local route entries.

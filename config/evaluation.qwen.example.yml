@@ -1,0 +1,10 @@
+schema_version: 1
+provider:
+  type: openai_compatible
+  # Start the existing llama.cpp temporarily on loopback before using this example.
+  base_url: http://127.0.0.1:8080/v1
+  model: qwen3.5-9b-instruct
+  api_key_env: RUNBOOKOS_LLAMA_API_KEY # pragma: allowlist secret - environment variable name, not a credential
+  timeout_seconds: 450
+  max_tokens: 700
+  temperature: 0

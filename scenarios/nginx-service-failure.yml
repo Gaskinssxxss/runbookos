@@ -1,0 +1,32 @@
+schema_version: 1
+incident_id: nginx-service-failure
+name: Nginx service failure
+target: example-web-01
+service: nginx
+failure_type: service_failure
+incident: The web endpoint returns connection errors.
+ground_truth: Nginx systemd unit is inactive on the web server.
+expected_classification: service_failure
+expected_root_cause: nginx_service_inactive
+expected_diagnostics: [web_health]
+available_diagnostics: [web_health, application_health, database_health, network_health]
+expected_evidence_refs: [FX-NGX-ACTIVE, FX-NGX-FAILED]
+evidence:
+  - ref: FX-NGX-ACTIVE
+    diagnostic_id: web_health
+    target: example-web-01
+    action: systemd.is_active
+    status: succeeded
+    evidence: {unit: nginx.service, active: false}
+  - ref: FX-NGX-FAILED
+    diagnostic_id: web_health
+    target: example-web-01
+    action: systemd.failed_units
+    status: succeeded
+    evidence: {units: [nginx.service]}
+recovery_criteria: [Nginx is active, web health assertion passes]
+mock_prediction:
+  classification: service_failure
+  root_cause: nginx_service_inactive
+  evidence_refs: [FX-NGX-ACTIVE, FX-NGX-FAILED]
+  diagnostic_ids: [web_health]

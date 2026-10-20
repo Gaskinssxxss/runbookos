@@ -1,0 +1,26 @@
+schema_version: 1
+incident_id: disk-pressure
+name: Disk pressure
+target: example-app-01
+service: root filesystem
+failure_type: resource_pressure
+incident: Application writes are failing and disk utilization alerts fired.
+ground_truth: Root filesystem utilization exceeded the configured 85 percent threshold.
+expected_classification: resource_pressure
+expected_root_cause: root_filesystem_above_threshold
+expected_diagnostics: [application_health]
+available_diagnostics: [web_health, application_health, database_health, network_health]
+expected_evidence_refs: [FX-DISK-ROOT]
+evidence:
+  - ref: FX-DISK-ROOT
+    diagnostic_id: application_health
+    target: example-app-01
+    action: os.disk
+    status: succeeded
+    evidence: {path: /, percent: 96, available_bytes: 9000000000}
+recovery_criteria: [Root filesystem utilization is below 85 percent, application health assertion passes]
+mock_prediction:
+  classification: resource_pressure
+  root_cause: root_filesystem_above_threshold
+  evidence_refs: [FX-DISK-ROOT]
+  diagnostic_ids: [application_health]

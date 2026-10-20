@@ -1,0 +1,34 @@
+api_version: runbookos/v1
+kind: Runbook
+metadata:
+  id: application-server-health
+  name: Application server health
+  description: Read-only check of the sample FastAPI service and guest resource state.
+  risk: low
+targets: [example-app-01]
+parameters:
+  max_used_percent: {type: integer, required: false, default: 85, minimum: 1, maximum: 99}
+preflight:
+  - id: preflight-failed-units
+    action: systemd.failed_units
+    verify: [{path: data.units, operator: empty}]
+steps:
+  - id: fastapi-active
+    action: systemd.is_active
+    with: {unit: runbookos-sample.service}
+    verify: [{path: data.active, operator: is_true}]
+  - id: memory-available
+    action: os.memory
+    verify:
+      - path: data.available_bytes
+        operator: gt
+        value: 134217728
+  - id: root-disk-capacity
+    action: os.disk
+    with: {path: /}
+    verify: [{path: data.percent, operator: lte, value: "$param.max_used_percent"}]
+postflight:
+  - id: fastapi-postflight
+    action: systemd.is_active
+    with: {unit: runbookos-sample.service}
+    verify: [{path: data.active, operator: is_true}]

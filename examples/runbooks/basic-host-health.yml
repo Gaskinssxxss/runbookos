@@ -1,0 +1,23 @@
+api_version: runbookos/v1
+kind: Runbook
+metadata:
+  id: basic-host-health
+  name: Basic host health
+  description: Read-only host uptime, memory, disk, and failed unit checks.
+  risk: low
+targets: [example-web-01]
+preflight:
+  - id: uptime
+    action: os.uptime
+    verify: [{path: data.seconds, operator: gte, value: 0}]
+steps:
+  - id: memory
+    action: os.memory
+    verify: [{path: data.total_bytes, operator: gt, value: 0}]
+  - id: root-disk
+    action: os.disk
+    with: {path: /}
+    verify: [{path: data.percent, operator: lte, value: 99}]
+  - id: failed-units
+    action: systemd.failed_units
+    verify: [{path: data.units, operator: empty}]

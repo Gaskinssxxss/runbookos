@@ -1,0 +1,28 @@
+api_version: runbookos/v1
+kind: Runbook
+metadata:
+  id: network-gateway-health
+  name: Network gateway health
+  description: Read-only checks of nftables service state, interfaces, and route presence.
+  risk: low
+targets: [example-net-01]
+preflight:
+  - id: preflight-failed-units
+    action: systemd.failed_units
+    verify: [{path: data.units, operator: empty}]
+steps:
+  - id: nftables-active
+    action: systemd.is_active
+    with: {unit: nftables.service}
+    verify: [{path: data.active, operator: is_true}]
+  - id: interfaces-present
+    action: network.interfaces
+    verify: [{path: data.interfaces, operator: nonempty}]
+  - id: routes-present
+    action: network.routes
+    verify: [{path: data.routes, operator: nonempty}]
+postflight:
+  - id: nftables-postflight
+    action: systemd.is_active
+    with: {unit: nftables.service}
+    verify: [{path: data.active, operator: is_true}]
