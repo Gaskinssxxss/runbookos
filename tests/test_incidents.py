@@ -18,6 +18,7 @@ from conftest import write_config_tree
 from typer.testing import CliRunner
 
 from runbookos.adapters.alertmanager import normalize_alertmanager
+from runbookos.adapters.alertmanager_bridge import create_server as create_signing_bridge
 from runbookos.cli import app
 from runbookos.errors import PolicyDenied
 from runbookos.incidents import IncidentStore, parse_alert, validate_target
@@ -563,11 +564,17 @@ def test_incident_cli_runs_mocked_read_only_engine_and_audits_timeline(
     runner = CliRunner()
     monkeypatch.setenv("RUNBOOKOS_TEST_HMAC", SECRET.decode())
     monkeypatch.setenv("RUNBOOKOS_OTHER_HMAC", "t" * 32)
+    monkeypatch.setenv("RUNBOOKOS_BRIDGE_USER", "staging-alertmanager")
+    monkeypatch.setenv("RUNBOOKOS_BRIDGE_PASSWORD", "u" * 32)
+    monkeypatch.setenv("RUNBOOKOS_BRIDGE_KEY_ID", "test-v2")
+    monkeypatch.setenv("RUNBOOKOS_BRIDGE_HMAC_KEY", SECRET.decode())
     server = create_server(paths.database, paths.inventory, auth_config(), port=0)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    bridge = create_signing_bridge(port=0, downstream_port=server.server_address[1])
+    bridge_thread = threading.Thread(target=bridge.serve_forever, daemon=True)
+    bridge_thread.start()
     try:
-        timestamp = str(int(time.time()))
         body = json.dumps(
             {
                 "version": "4",
@@ -593,35 +600,57 @@ def test_incident_cli_runs_mocked_read_only_engine_and_audits_timeline(
             }
         ).encode()
 
-        def authenticated_ingest(nonce: str):
-            signature = hmac.new(
-                SECRET,
-                b"test-v2\n" + timestamp.encode() + b"\n" + nonce.encode() + b"\n" + body,
-                hashlib.sha256,
-            ).hexdigest()
+        def alertmanager_delivery():
             request = urllib.request.Request(
-                f"http://127.0.0.1:{server.server_address[1]}/v1/alerts",
+                f"http://127.0.0.1:{bridge.server_address[1]}/api/v2/alerts",
                 data=body,
                 method="POST",
                 headers={
-                    "Content-Type": "application/vnd.prometheus.alertmanager.v2+json",
-                    "X-RunbookOS-Timestamp": timestamp,
-                    "X-RunbookOS-Nonce": nonce,
-                    "X-RunbookOS-Key-Id": "test-v2",
-                    "X-RunbookOS-Signature": signature,
+                    "Content-Type": "application/json",
+                    "Authorization": "Basic "
+                    + __import__("base64").b64encode(b"staging-alertmanager:" + b"u" * 32).decode(),
                 },
             )
             with urllib.request.urlopen(request, timeout=2) as response:
                 return json.loads(response.read())
 
-        ingested = authenticated_ingest("e2e_nonce_0123456789abc")
-        incident_id = ingested["incident_id"]
-        duplicate = authenticated_ingest("e2e_nonce_1123456789abc")
-        assert duplicate["duplicate_delivery"] is True
+        with pytest.raises(urllib.error.HTTPError) as denied:
+            urllib.request.urlopen(
+                urllib.request.Request(
+                    f"http://127.0.0.1:{bridge.server_address[1]}/api/v2/alerts",
+                    data=body,
+                    method="POST",
+                    headers={"Content-Type": "application/json", "Authorization": "Basic bad"},
+                ),
+                timeout=2,
+            )
+        assert denied.value.code == 401
+        accepted = alertmanager_delivery()
+        assert accepted == {"accepted": True}
+        rows = IncidentStore(SQLiteStore(paths.database)).alert_list(10)
+        assert len(rows) == 1
+        incident_id = rows[0]["incident_id"]
+        assert alertmanager_delivery() == {"accepted": True}
+        assert len(IncidentStore(SQLiteStore(paths.database)).alert_list(10)) == 1
+        with sqlite3.connect(paths.database) as db:
+            assert db.execute("SELECT COUNT(DISTINCT nonce) FROM webhook_nonces").fetchone()[0] == 2
+            assert db.execute("SELECT COUNT(*) FROM executions").fetchone()[0] == 0
     finally:
+        bridge.shutdown()
+        bridge.server_close()
+        bridge_thread.join(timeout=2)
         server.shutdown()
         server.server_close()
-        thread.join(timeout=2)
+        server_thread.join(timeout=2)
+    restarted = create_server(paths.database, paths.inventory, auth_config(), port=0)
+    restarted_thread = threading.Thread(target=restarted.serve_forever, daemon=True)
+    restarted_thread.start()
+    try:
+        assert IncidentStore(SQLiteStore(paths.database)).show(incident_id)["status"] == "NEW"
+    finally:
+        restarted.shutdown()
+        restarted.server_close()
+        restarted_thread.join(timeout=2)
     ack = runner.invoke(
         app, root + ["incidents", "acknowledge", incident_id, "--reason", "operator reviewed"]
     )

@@ -1,0 +1,42 @@
+schema_version: 1
+status: pending_operator_approval
+scope_note: >-
+  This manifest is a request boundary only. No live tests, SSH, inference, public listener,
+  persistent service, or operational deployment are authorized by this file.
+requested_acceptance:
+  - id: real-alertmanager-process
+    source_process: operator-started Alertmanager on the same development host
+    destination: 127.0.0.1:8764/tcp POST /api/v2/alerts
+    authentication: HTTP Basic credential from the isolated staging password file
+    effects: synthetic alert ingestion into .runbookos-staging-v032/state/runbookos.sqlite3
+    persistence: foreground/local process only; no firewall or system service
+    approval_required: true
+  - id: real-monitoring-generated-alert
+    source_process: explicitly selected monitoring sender
+    destination: 127.0.0.1:8764/tcp POST /api/v2/alerts
+    authentication: HTTP Basic credential from isolated staging
+    effects: alert/incident records in isolated staging SQLite only
+    approval_required: true
+  - id: live-read-only-ssh-diagnostics
+    source: ops-01 RunbookOS controller
+    targets:
+      - target_alias: svc-web-01
+        allowed_actions: [systemd.is_active, systemd.failed_units, os.uptime, os.memory, os.disk]
+      - target_alias: svc-app-01
+        allowed_actions: [systemd.is_active, systemd.failed_units, os.uptime, os.memory, os.disk]
+      - target_alias: db-01
+        allowed_actions: [systemd.is_active, systemd.failed_units, os.uptime, os.memory, os.disk]
+      - target_alias: net-01
+        allowed_actions: [systemd.is_active, systemd.failed_units, os.uptime, os.memory, os.disk]
+    transport: existing dedicated non-sudo identity and pinned host keys only
+    database: separate isolated staging SQLite
+    approval_required: true
+  - id: local-qwen-inference
+    source: explicitly started RunbookOS staging process
+    destination: existing approved local inference tunnel only
+    effects: synthetic incident/evidence prompt to local Qwen; no SSH by inference
+    approval_required: true
+  - id: operational-deployment
+    target: named host/account/path/ports must be supplied by operator
+    includes: [persistent_service, remote_listener, secret_delivery, operational_database_migration]
+    approval_required: true

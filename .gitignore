@@ -1,4 +1,5 @@
 .venv/
+.runbookos-staging-v032/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/

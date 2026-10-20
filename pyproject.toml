@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "runbookos"
-version = "0.3.1"
+version = "0.3.2"
 description = "A safe, auditable runbook and infrastructure diagnostic evaluation engine"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -22,6 +22,7 @@ dev = ["pytest>=8,<9", "pytest-cov>=5,<7", "build>=1.2,<2", "ruff>=0.8,<1"]
 
 [project.scripts]
 runbookos = "runbookos.cli:app"
+runbookos-alertmanager-bridge = "runbookos.adapters.alertmanager_bridge:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -39,6 +40,7 @@ where = ["src"]
 ]
 "share/runbookos/examples/runbooks" = ["examples/runbooks/*.yml"]
 "share/runbookos/examples/alerts" = ["examples/alerts/*.json"]
+"share/runbookos/examples/alertmanager" = ["examples/alertmanager/*.yml"]
 "share/runbookos/scenarios" = ["scenarios/*.yml"]
 "share/runbookos/scenarios/metadata" = ["scenarios/metadata/*.yml"]
 

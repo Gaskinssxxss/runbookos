@@ -1,4 +1,4 @@
-# Security model and v0.3.1 limits
+# Security model and operational limits
 
 ## Enforced in code
 

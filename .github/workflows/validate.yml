@@ -17,9 +17,9 @@ jobs:
           python -m pip install -r requirements-ci-py312.lock
           python -m pip install --no-deps --no-build-isolation -e .
       - name: Compile
-        run: python -m compileall -q src tests
+        run: python -m compileall -q src tests scripts
       - name: Lint
-        run: ruff check src tests
+        run: ruff check src tests scripts
       - name: Unit and integration tests
         run: pytest --cov=runbookos --cov-report=term-missing --cov-fail-under=70
       - name: Validate example runbooks
@@ -38,7 +38,10 @@ jobs:
           with ZipFile(wheel) as archive:
               names = archive.namelist()
               assert any(name.endswith("runbookos/ssh.py") for name in names)
-              assert any(name.endswith("runbookos-0.3.1.dist-info/METADATA") for name in names)
+              assert any(name.endswith("runbookos/adapters/alertmanager_bridge.py") for name in names)
+              assert any(name.endswith("share/runbookos/examples/alertmanager/receiver.example.yml") for name in names)
+              assert any(name.endswith("runbookos-0.3.2.dist-info/entry_points.txt") for name in names)
+              assert any(name.endswith("runbookos-0.3.2.dist-info/METADATA") for name in names)
               assert not any("homelab" in name for name in names)
               assert not any("reports/" in name or ".sqlite" in name for name in names)
           with tar_open(sdist, "r:gz") as archive:
@@ -47,6 +50,10 @@ jobs:
               assert any(name.endswith("/README.md") for name in names)
               assert any(name.endswith("/docs/security.md") for name in names)
               assert any(name.endswith("/tests/test_store_ssh.py") for name in names)
+              assert any(name.endswith("/scripts/staging-v032.py") for name in names)
+              assert any(name.endswith("/tests/test_alertmanager_bridge.py") for name in names)
+              assert any(name.endswith("/docs/implementation-report-v0.3.2.md") for name in names)
+              assert any(name.endswith("/docs/staging-acceptance-v0.3.2.md") for name in names)
               assert not any("homelab" in name for name in names)
               assert not any("reports/" in name or ".sqlite" in name for name in names)
           print(f"wheel={wheel} bytes={wheel.stat().st_size}")
@@ -56,6 +63,6 @@ jobs:
       - name: Verify installed wheel version parity
         run: |
           python -m pip uninstall -y runbookos
-          python -m pip install --no-deps dist/runbookos-0.3.1-py3-none-any.whl
-          python -c 'from importlib.metadata import version; import runbookos; assert version("runbookos") == runbookos.__version__ == "0.3.1"'
+          python -m pip install --no-deps dist/runbookos-0.3.2-py3-none-any.whl
+          python -c 'from importlib.metadata import version; import runbookos; assert version("runbookos") == runbookos.__version__ == "0.3.2"'
           runbookos version

@@ -1,6 +1,8 @@
-# RunbookOS v0.3.1 — Integration Hardening & Deployment Readiness
+# RunbookOS v0.3.2 — Integrated Operations MVP
 
-RunbookOS is a lightweight Python CLI for validating, planning, running, and auditing Linux operational runbooks, with optional AI-assisted incident investigation and human-controlled alert-to-incident workflow. It uses versioned YAML/JSON, Pydantic, Typer, SQLite, OpenSSH, and a vendor-neutral OpenAI-compatible HTTP adapter. The optional webhook is disabled unless started manually and binds only to loopback. There is no autonomous remediation loop.
+Development branch: `feat/v0.3.2-integrated-operations`. v0.3.1 remains the last stable development baseline. This branch is a local staging MVP, not a production release.
+
+RunbookOS is a lightweight Python CLI for validating, planning, running, and auditing Linux operational runbooks, with optional AI-assisted incident investigation and human-controlled alert-to-incident workflow. It uses versioned YAML/JSON, Pydantic, Typer, SQLite, OpenSSH, and a replaceable provider interface with one OpenAI-compatible HTTP implementation. The optional webhook is disabled unless started manually and binds only to loopback. There is no autonomous remediation loop.
 
 ## Safety model
 
@@ -13,6 +15,21 @@ RunbookOS is a lightweight Python CLI for validating, planning, running, and aud
 - AI is disabled unless `runbookos investigate` is explicitly invoked. Incident text is not persisted; investigation history stores its SHA-256, model metadata, findings, evidence references, and recommendations. Treat the configured model provider as a recipient of the incident and bounded diagnostic evidence.
 - Alert ingestion creates or correlates incident records but never starts diagnostics. Operators must acknowledge and explicitly request an investigation. Alert text and metadata remain untrusted data.
 - The optional HMAC webhook is foreground-only, loopback-bound, size/concurrency/rate limited, and uses timestamped nonces. It is not a remote or production listener.
+
+## v0.3.2 integrated staging
+
+The Alertmanager adapter remains in RunbookOS. Since generic Alertmanager webhook delivery does not produce the RunbookOS per-source HMAC headers, v0.3.2 adds a separate loopback signing bridge. The bridge requires a staging Basic credential from the configured sender, signs the exact payload with a fresh nonce, and acknowledges only after RunbookOS returns a durable ingestion receipt. It has no incident lifecycle, SSH, AI, or remediation endpoint.
+
+For a disposable local staging area (separate venv/config/secrets/SQLite), use:
+
+```sh
+python3 scripts/staging-v032.py init
+python3 scripts/staging-v032.py start
+python3 scripts/staging-v032.py status
+python3 scripts/staging-v032.py stop
+```
+
+Generated state is retained under the ignored `.runbookos-staging-v032/` directory. The launcher binds only `127.0.0.1`, refuses to overwrite existing staging data, and does not install a service. See [`docs/staging-acceptance-v0.3.2.md`](docs/staging-acceptance-v0.3.2.md) and [`docs/approval-manifest-v0.3.2.yml`](docs/approval-manifest-v0.3.2.yml). No real Alertmanager, live SSH, Qwen inference, or operational deployment is implied by fixture tests.
 
 ## Install
 

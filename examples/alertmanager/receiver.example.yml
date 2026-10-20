@@ -1,0 +1,14 @@
+# Merge into an Alertmanager configuration managed outside RunbookOS.
+# The bridge accepts this only on loopback and requires these credentials.
+route:
+  receiver: runbookos-local
+
+receivers:
+  - name: runbookos-local
+    webhook_configs:
+      - url: http://127.0.0.1:8764/api/v2/alerts
+        send_resolved: true
+        http_config:
+          basic_auth:
+            username: alertmanager-staging
+            password_file: /path/to/.runbookos-staging-v032/run/alertmanager-password
