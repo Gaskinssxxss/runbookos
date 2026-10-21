@@ -47,3 +47,105 @@ No Git staging, commit, push, tag, merge, publication, or deployment is authoriz
 ## Verdict
 
 Final offline integration verdict: previously **PASS**. Reproducible operator demo: **PASS** using the fake executor and synthetic data. Release-candidate verification: **PASS** for offline checks and artifacts; this does not imply deployment readiness. Historical real Alertmanager v0.3.2 acceptance: **PASS**, separately. Real SSH remediation: **NOT RUN**. Live AI inference: **NOT RUN**. Natural monitoring rule: **NOT RUN**. Operational deployment: **NOT AUTHORIZED**.
+
+## AI acceptance and current release-candidate addendum
+
+This addendum records the current checkout review at HEAD
+`c080a37c24a6d3ae09356e68d7c5cc249db6e69f`. The preceding sections describe
+the earlier dashboard/demo review and remain historical; they are not evidence
+of the checks below.
+
+### AI acceptance result
+
+The bounded synthetic Qwen rerun in
+`docs/ai-diagnostic-selection-rerun-results-v0.6.0.md` completed all five
+scenarios: four exact catalog selections and one valid empty-selection
+abstention. There were zero catalog/selection-policy rejections and 10 serial
+model requests without retries. All emitted citations referenced available
+diagnostic evidence. The four diagnostic step assertions were `failed`, with
+zero verified evidence; citation validity is not a claim of verified service
+health. Semantic causal support and structured classification/root-cause
+accuracy were not scored. ResourceWatch, SQLite integrity, audit verification,
+and acceptance process cleanup passed as documented in that report. The prior
+partial AI reports remain unchanged.
+
+### Verification in this checkout
+
+- Full offline pytest: **190 passed, 11 skipped**. Skips are opt-in live AI,
+  live homelab, live probe, and live tunnel tests. No tests initiated live
+  infrastructure access.
+- Ruff lint (`ruff check .`): passed.
+- Ruff format check on AI source, tests, harness, and orchestrator: passed.
+- Ruff format check over the entire checkout: one formatting failure in the
+  unrelated, untracked historical
+  `docs/dashboard-staging-acceptance-v0.4.0.md`. That file was not changed.
+- `git diff --check`: passed.
+- The `detect-secrets` executable is unavailable in this environment. A
+  limited manual pattern review found no private-key block or credential value
+  in the inspected AI acceptance files. It did identify machine-local paths in
+  some acceptance artifacts, listed below. This is not equivalent to a full
+  automated secret scan.
+
+### Proposed AI acceptance commit manifest
+
+This is a proposal only. Nothing is staged. These exact files belong to the
+prompt correction and portable synthetic acceptance work:
+
+- `src/runbookos/ai.py`
+- `tests/test_ai.py`
+- `tests/ai_acceptance_config_v060.py`
+- `tests/ai_acceptance_harness_v060.py`
+- `tests/fixtures/ai_acceptance_v060/scenarios.json`
+- `tests/test_ai_acceptance_harness_v060.py`
+- `docs/diagnostic-selection-analysis-v0.6.0.md`
+- `docs/ai-diagnostic-selection-rerun-v0.6.0.md`
+- `docs/ai-diagnostic-selection-rerun-results-v0.6.0.md`
+- `docs/release-candidate-review-v0.6.0.md`
+
+The local live orchestrator and its tests are relevant acceptance tooling but
+are held out of this proposed product manifest until their machine-specific
+artifact paths are removed or the files are clearly maintained as local-only:
+
+- `scripts/ai-local-acceptance-v060.py` — embeds local model, runtime, and
+  API-key file paths.
+- `tests/test_ai_local_orchestrator_v060.py` — tests the held-out orchestrator.
+
+Also excluded from the proposed manifest:
+
+- `docs/ai-acceptance-approval-v0.6.0.yml` and
+  `docs/ai-acceptance-preparation-v0.6.0.md` — contain host-specific paths and
+  operational acceptance details; the approval manifest remains
+  `NOT_AUTHORIZED`.
+- `docs/ai-local-inference-acceptance-v0.6.0.md`,
+  `docs/ai-local-inference-addendum-v0.6.0.md`,
+  `docs/ai-local-inference-rerun-v0.6.0.md`,
+  `docs/ai-local-inference-rerun-results-v0.6.0.md`, and
+  `docs/ai-local-rerun-readiness-v0.6.0.md` — preserve as historical/local
+  acceptance records unless separately sanitized and reviewed.
+- `docs/disposable-remediation-approval-v0.5.0.yml` — unrelated pre-existing
+  local modification; preserve and exclude.
+- `docs/dashboard-staging-acceptance-report-v0.4.0.md` — unrelated historical
+  untracked report; preserve and exclude.
+- `.runbookos-staging-v032/`, SQLite databases, logs, credentials, model
+  artifacts, and temporary acceptance state — not part of the manifest.
+
+The local runner has no observed secret value, but its fixed absolute
+workstation paths make it inappropriate for an unreviewed public commit. The synthetic SQLite
+and JSON summary remain outside the repository. No Git staging, commit, push,
+or release was performed.
+
+### Integration boundary and limitations
+
+- Offline regression tests passed; live Qwen results apply only to the stated
+  synthetic scenarios and do not establish model accuracy on production
+  incidents.
+- Historical read-only SSH diagnostic acceptance is separate. No new SSH
+  checks were run in this review.
+- Real service-health verification remains outstanding; the four synthetic
+  diagnostic assertions failed and verified-evidence count was zero.
+- Real remediation was neither executed nor authorized.
+- Operational deployment remains **NOT AUTHORIZED**.
+
+Current recommendation: **READY_FOR_COMMIT_REVIEW** for the exact proposed
+manifest above, subject to review of the held-out local runner and its
+machine-specific paths. This is not a production-readiness verdict.

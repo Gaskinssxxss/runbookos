@@ -1,0 +1,37 @@
+[
+  {
+    "id": "nginx-unavailable",
+    "incident_text": "Synthetic staging report: the Nginx service is reported unavailable.",
+    "diagnostic_id": "web_health",
+    "expected_observation": "nginx.service inactive",
+    "expected_classification": "service_failure"
+  },
+  {
+    "id": "fastapi-service-failure",
+    "incident_text": "Synthetic staging report: the FastAPI application service failed.",
+    "diagnostic_id": "application_health",
+    "expected_observation": "runbookos-sample.service inactive",
+    "expected_classification": "service_failure"
+  },
+  {
+    "id": "postgresql-protocol-failure",
+    "incident_text": "Synthetic staging report: PostgreSQL protocol availability failed.",
+    "diagnostic_id": "database_health",
+    "expected_observation": "PostgreSQL SSLRequest unavailable at synthetic endpoint",
+    "expected_classification": "connectivity_failure"
+  },
+  {
+    "id": "network-connectivity-failure",
+    "incident_text": "Synthetic staging report: expected network route is absent.",
+    "diagnostic_id": "network_health",
+    "expected_observation": "synthetic route table is empty",
+    "expected_classification": "network_failure"
+  },
+  {
+    "id": "insufficient-evidence",
+    "incident_text": "Synthetic staging report: intermittent symptoms with no corroborating telemetry.",
+    "diagnostic_id": null,
+    "expected_observation": "no diagnostic evidence is available",
+    "expected_classification": "unknown"
+  }
+]
