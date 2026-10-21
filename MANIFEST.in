@@ -1,6 +1,7 @@
 include README.md LICENSE pyproject.toml requirements-ci-py312.lock
 recursive-include src *.py
 include scripts/staging-v032.py
+include scripts/demo-v060.py
 recursive-include config *.example.yml
 exclude config/*.homelab.example.yml
 recursive-include examples *.yml *.json
@@ -40,3 +41,7 @@ include docs/workflow-security-v0.6.0.md
 include docs/dashboard-patch-v0.4.1.md
 include docs/release-staging-manifest-v0.4.0.md
 include docs/staging-acceptance-v0.3.2.md
+
+include docs/full-workflow-acceptance-v0.6.0.md
+include docs/operator-demo-v0.6.0.md
+include docs/release-candidate-review-v0.6.0.md
