@@ -10,10 +10,12 @@ import sqlite3
 import subprocess
 import sys
 import time
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from conftest import write_config_tree
 
 from runbookos.dashboard import (
     _MAX_SESSIONS,
@@ -23,6 +25,7 @@ from runbookos.dashboard import (
     _hash_password,
     create_auth_file,
 )
+from runbookos.engine import RunbookEngine
 from runbookos.errors import ConfigurationError
 from runbookos.incidents import IncidentStore, parse_alert
 from runbookos.store import SQLiteStore
@@ -114,6 +117,25 @@ def test_authenticated_dashboard_lifecycle_csrf_xss_and_restart(tmp_path: Path) 
             ).encode()
         )
     )
+    remediation_paths = write_config_tree(tmp_path / "remediation-config", remediation=True)
+    remediation_paths = replace(remediation_paths, database=database)
+    engine = RunbookEngine(remediation_paths)
+    plan = engine.plan(tmp_path / "remediation-config/runbook.yml")
+    remediation_incident = incident_store.ingest(
+        parse_alert(
+            json.dumps(
+                _alert("<img src=x onerror=alert(7)>")
+                | {
+                    "alert_id": "dash-remediation-alert",
+                    "target_alias": "test-web",
+                    "fingerprint": "dash-remediation",
+                }
+            ).encode()
+        )
+    )["incident_id"]
+    incident_store.associate_remediation_plan(
+        remediation_incident, plan.plan_id, plan.plan_hash, "trusted-operator<script>"
+    )
     # Model a legacy event row created before transition fields were recorded.
     with sqlite3.connect(database) as db:
         db.execute(
@@ -204,8 +226,33 @@ def test_authenticated_dashboard_lifecycle_csrf_xss_and_restart(tmp_path: Path) 
         assert "<th>Source</th>" in queue and "<th>Summary</th>" in queue
         assert "bounded-" + "x" * 230 in queue
         assert "x" * 240 not in queue
+        status, _, remediation_detail = request(
+            "GET", f"/incidents/{remediation_incident}", cookie=cookie
+        )
+        assert status == 200
+        assert plan.plan_id in remediation_detail
+        assert "systemd.restart" in remediation_detail
+        assert "Approval: not_issued" in remediation_detail
+        assert "Preflight:" in remediation_detail and "postflight:" in remediation_detail
+        assert "trusted-operator&lt;script&gt;" in remediation_detail
+        assert "trusted-operator<script>" not in remediation_detail
+        assert "<img src=x onerror=alert(7)>" not in remediation_detail
+        assert "&lt;img src=x onerror=alert(7)&gt;" in remediation_detail
+        assert "remediation-preview" not in remediation_detail
         csrf = re.search(r"name='csrf' value='([^']+)'", detail)
         assert csrf
+        remediation_csrf = re.search(r"name='csrf' value='([^']+)'", remediation_detail)
+        assert remediation_csrf
+        status, _, _ = request(
+            "POST",
+            f"/incidents/{remediation_incident}/remediation/execute",
+            f"csrf={remediation_csrf.group(1)}&plan_id={plan.plan_id}",
+            cookie,
+        )
+        assert status == 404
+        with SQLiteStore(database)._connection() as db:
+            assert db.execute("SELECT count(*) FROM approvals").fetchone()[0] == 0
+            assert db.execute("SELECT count(*) FROM executions").fetchone()[0] == 0
 
         status, _, _ = request(
             "POST", f"/incidents/{incident_id}/acknowledge", "reason=reviewed", cookie
@@ -306,8 +353,19 @@ def test_authenticated_dashboard_lifecycle_csrf_xss_and_restart(tmp_path: Path) 
         status, _, login = request("GET", "/login")
         assert status == 200
         assert incident_store.show(incident_id)["status"] == "CLOSED"
+        assert (
+            incident_store.show(remediation_incident)["remediation_plans"][0]["plan_id"]
+            == plan.plan_id
+        )
         valid, count = SQLiteStore(database).verify_audit_chain()
         assert valid and count >= 5
+        status, headers, _ = request("POST", "/login", "password=sample-login-phrase-123")
+        assert status == 303
+        restarted_cookie = headers["Set-Cookie"].split(";", 1)[0]
+        status, _, remediation_detail = request(
+            "GET", f"/incidents/{remediation_incident}", cookie=restarted_cookie
+        )
+        assert status == 200 and plan.plan_id in remediation_detail
     finally:
         process.send_signal(2)
         process.wait(timeout=5)

@@ -382,7 +382,7 @@ def test_sqlite_v1_schema_migrates_additively_and_retains_plan_rows(tmp_path: Pa
     migrated = SQLiteStore(database)
     assert migrated.get_plan("legacy-plan")["plan_id"] == "legacy-plan"
     with sqlite3.connect(database) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
         assert (
             connection.execute(
                 "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='investigations'"

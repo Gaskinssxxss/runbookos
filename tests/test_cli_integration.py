@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import getpass
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 from conftest import write_config_tree
 from typer.testing import CliRunner
 
 from runbookos.cli import app
+from runbookos.engine import RunbookEngine
+from runbookos.incidents import IncidentStore, parse_alert
 from runbookos.store import SQLiteStore
 
 
@@ -145,6 +148,112 @@ def test_approval_command_executes_once_only(tmp_path: Path, key_material, monke
     assert replay.exit_code == 2, replay.output
     assert "no valid, unused approval" in replay.output
     assert calls.read_text().splitlines() == ["called"] * 3
+
+
+def test_incident_remediation_cli_association_and_review_are_human_controlled(
+    tmp_path: Path,
+) -> None:
+    paths = write_config_tree(tmp_path, remediation=True)
+    engine = RunbookEngine(paths)
+    plan = engine.plan(tmp_path / "runbook.yml")
+    incidents = IncidentStore(engine.store)
+    alert = parse_alert(
+        json.dumps(
+            {
+                "alert_id": "cli-incident-alert",
+                "source": "test-monitor",
+                "event_timestamp": datetime.now(UTC).isoformat(),
+                "severity": "error",
+                "target_alias": "test-web",
+                "service": "nginx",
+                "category": "service",
+                "summary": "Synthetic CLI test incident",
+                "fingerprint": "cli-incident-fingerprint",
+                "metadata": {},
+            }
+        ).encode()
+    )
+    incident_id = incidents.ingest(alert)["incident_id"]
+    root_args = [
+        "--inventory",
+        str(paths.inventory),
+        "--policy",
+        str(paths.policy),
+        "--ssh-profiles",
+        str(paths.ssh_profiles),
+        "--db",
+        str(paths.database),
+    ]
+    runner = CliRunner()
+
+    linked = runner.invoke(
+        app, root_args + ["incidents", "associate-plan", incident_id, plan.plan_id]
+    )
+    assert linked.exit_code == 0, linked.output
+    link_doc = json.loads(linked.output)
+    assert link_doc["approval_granted"] is False
+    assert link_doc["execution_started"] is False
+
+    reviewed = runner.invoke(app, root_args + ["incidents", "remediation-review", incident_id])
+    assert reviewed.exit_code == 0, reviewed.output
+    review_doc = json.loads(reviewed.output)
+    assert review_doc["remediation_plans"][0]["preview_status"] == "valid_current_plan"
+    assert review_doc["remediation_plans"][0]["approval"]["state"] == "not_issued"
+    assert review_doc["audit"]["valid"] is True
+    with SQLiteStore(paths.database)._connection() as db:
+        assert db.execute("SELECT count(*) FROM approvals").fetchone()[0] == 0
+        assert db.execute("SELECT count(*) FROM executions").fetchone()[0] == 0
+        assert (
+            db.execute(
+                "SELECT count(*) FROM incident_events WHERE event_type='incident.remediation_reviewed'"
+            ).fetchone()[0]
+            == 1
+        )
+
+    paths.policy.write_text(paths.policy.read_text() + "\n# policy changed after planning\n")
+    stale = runner.invoke(app, root_args + ["incidents", "remediation-review", incident_id])
+    assert stale.exit_code == 0, stale.output
+    assert json.loads(stale.output)["remediation_plans"][0]["preview_status"] == "stale_or_invalid"
+
+
+def test_incident_remediation_cli_rejects_cross_target_association(tmp_path: Path) -> None:
+    paths = write_config_tree(tmp_path, remediation=True)
+    engine = RunbookEngine(paths)
+    plan = engine.plan(tmp_path / "runbook.yml")
+    incidents = IncidentStore(engine.store)
+    alert = parse_alert(
+        json.dumps(
+            {
+                "alert_id": "cross-target-alert",
+                "source": "test-monitor",
+                "event_timestamp": datetime.now(UTC).isoformat(),
+                "severity": "error",
+                "target_alias": "other-host",
+                "service": "nginx",
+                "category": "service",
+                "summary": "Mismatched target",
+                "fingerprint": "cross-target-fingerprint",
+                "metadata": {},
+            }
+        ).encode()
+    )
+    incident_id = incidents.ingest(alert)["incident_id"]
+    root_args = [
+        "--inventory",
+        str(paths.inventory),
+        "--policy",
+        str(paths.policy),
+        "--ssh-profiles",
+        str(paths.ssh_profiles),
+        "--db",
+        str(paths.database),
+    ]
+    result = CliRunner().invoke(
+        app, root_args + ["incidents", "associate-plan", incident_id, plan.plan_id]
+    )
+    assert result.exit_code == 2
+    assert "target must exactly match" in result.output
+    assert incidents.remediation_context(incident_id) == []
 
 
 def test_unknown_ssh_result_is_persisted_without_retry(

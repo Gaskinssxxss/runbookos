@@ -35,6 +35,8 @@ include docs/remediation-security-v0.5.0.md
 include docs/implementation-report-v0.5.0.md
 include docs/remediation-acceptance-v0.5.0.md
 include docs/disposable-remediation-approval-v0.5.0.yml
+include docs/implementation-report-v0.6.0.md
+include docs/workflow-security-v0.6.0.md
 include docs/dashboard-patch-v0.4.1.md
 include docs/release-staging-manifest-v0.4.0.md
 include docs/staging-acceptance-v0.3.2.md

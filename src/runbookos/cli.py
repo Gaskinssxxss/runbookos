@@ -462,6 +462,76 @@ def incident_show(ctx: typer.Context, incident_id: str) -> None:
         _fail(exc)
 
 
+@incidents_app.command("associate-plan")
+def incident_associate_plan(
+    ctx: typer.Context,
+    incident_id: str,
+    plan_id: str = typer.Argument(..., help="Persisted policy-allowed remediation plan UUID."),
+) -> None:
+    """Associate a validated remediation plan with an incident; grants no approval."""
+    try:
+        manager = IncidentStore(SQLiteStore(ctx.obj.database))
+        incident = manager.show(incident_id)
+        preview = _engine(ctx).remediation_preview(plan_id)
+        if preview["target"]["alias"] != incident["target_alias"]:
+            raise RunbookOSError("remediation plan target must exactly match the incident target")
+        result = manager.associate_remediation_plan(
+            incident_id,
+            plan_id,
+            preview["plan_hash"],
+            getpass.getuser(),
+        )
+        _json(result)
+    except Exception as exc:
+        _fail(exc)
+
+
+@incidents_app.command("remediation-review")
+def incident_remediation_review(ctx: typer.Context, incident_id: str) -> None:
+    """Audit and display linked remediation plans, approvals, evidence, and outcomes."""
+    try:
+        manager = IncidentStore(SQLiteStore(ctx.obj.database))
+        incident = manager.show(incident_id)
+        plans = manager.remediation_context(incident_id)
+        engine = _engine(ctx)
+        reviewed = []
+        for item in plans:
+            review = dict(item)
+            try:
+                review["preview"] = engine.remediation_preview(item["plan_id"])
+                review["preview_status"] = "valid_current_plan"
+            except Exception:
+                review["preview_status"] = "stale_or_invalid"
+            if item["unknown_outcome_warning"]:
+                review["operator_warning"] = (
+                    "UNKNOWN outcome: independently inspect target state before considering another action"
+                )
+            reviewed.append(review)
+        manager.record_remediation_review(incident_id, getpass.getuser())
+        valid, count = manager.store.verify_audit_chain()
+        _json(
+            {
+                "incident": {
+                    "incident_id": incident["incident_id"],
+                    "status": incident["status"],
+                    "severity": incident["severity"],
+                    "target_alias": incident["target_alias"],
+                    "service": incident["service"],
+                    "source_alerts": [
+                        {"source": item["source"], "alert_id": item["alert_id"]}
+                        for item in incident["alerts"]
+                    ],
+                    "investigations": incident["investigations"],
+                },
+                "remediation_plans": reviewed,
+                "audit": {"valid": valid, "event_count": count},
+                "review_is_execution": False,
+            }
+        )
+    except Exception as exc:
+        _fail(exc)
+
+
 def _incident_transition(
     ctx: typer.Context,
     incident_id: str,

@@ -748,7 +748,7 @@ def test_v2_upgrade_is_additive_and_preserves_audit(tmp_path: Path):
     assert migrated.get_plan("legacy-v2-plan")["kept"] is True
     assert migrated.verify_audit_chain()[0]
     with migrated._connection() as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 4
         assert (
             db.execute(
                 "SELECT count(*) FROM audit_events WHERE kind='legacy.v2_marker'"

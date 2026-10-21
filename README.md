@@ -1,6 +1,6 @@
-# RunbookOS v0.5.0 — Human-Controlled Remediation MVP
+# RunbookOS v0.6.0 — Incident-to-Remediation Workflow
 
-Development branch: `feat/v0.4.0-operator-dashboard`, based on the v0.3.2 integrated operations baseline. This is a local-first operator dashboard MVP, not a production release.
+Development branch: `feat/v0.6.0-incident-remediation-workflow`, based on the v0.5.0 human-controlled remediation baseline. Incident-linked remediation review reuses the existing plans, one-time approvals, policy, execution history, and audit storage.
 
 RunbookOS is a lightweight Python CLI for validating, planning, running, and auditing Linux operational runbooks, with optional AI-assisted incident investigation and human-controlled alert-to-incident workflow. It uses versioned YAML/JSON, Pydantic, Typer, SQLite, OpenSSH, and a replaceable provider interface with one OpenAI-compatible HTTP implementation. The optional webhook is disabled unless started manually and binds only to loopback. There is no autonomous remediation loop.
 
@@ -50,6 +50,12 @@ Open `http://127.0.0.1:8780/`. The auth verifier must be a regular file owned by
 `systemd.restart` remains disabled by default in shipped policies. A remediation runbook must target one host, contain exactly one registered mutable step, and include assertion-bearing read-only preflight and postflight checks. Review a persisted plan using `runbookos remediation-preview PLAN_ID`, approve it with `runbookos approve`, then separately execute using `runbookos run PLAN_ID --confirm`. The CLI records the local OS operator identity for the explicit confirmation. Approval is one-time, expiring, and bound to the immutable plan and current implementation/configuration fingerprints.
 
 Execution results carry `VERIFIED_SUCCESS`, `VERIFIED_FAILURE`, `UNKNOWN`, or `NOT_EXECUTED`. An uncertain SSH result is never retried, and no automatic rollback is attempted. The dashboard, alerts, and AI cannot invoke remediation. See [`docs/remediation-security-v0.5.0.md`](docs/remediation-security-v0.5.0.md) and the reserved-target example [`examples/runbooks/disposable-systemd-restart.yml`](examples/runbooks/disposable-systemd-restart.yml). The example target is intentionally absent from the shipped inventory and policy.
+
+## v0.6.0 incident-to-remediation review
+
+An operator can associate an existing, current, single-target remediation plan with an incident using `runbookos incidents associate-plan INCIDENT_ID PLAN_ID`. Association records the immutable plan hash, target, registered action, and OS-derived actor; it is not approval and cannot execute the plan. `runbookos incidents remediation-review INCIDENT_ID` presents incident context, linked investigations and evidence references, a revalidated deterministic plan preview, approval state, and previous outcomes. `UNKNOWN` outcomes are called out for independent investigation. Execution remains an explicit CLI action using the existing v0.5.0 approval and confirmation flow. The dashboard only displays associated plan, approval, and outcome context; it has no approval or execution control. Successful remediation never changes incident lifecycle state automatically.
+
+The incident-plan association uses an additive SQLite migration. Historical plans, executions, audit events, benchmark data, and the v0.5.0 disposable-target manifest are retained. That manifest remains `NOT_AUTHORIZED`; this release is offline-validated and does not claim live remediation acceptance.
 
 ## Install
 

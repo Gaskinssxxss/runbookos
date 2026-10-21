@@ -21,6 +21,15 @@ def canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
+def plan_document_hash(document: dict[str, Any]) -> str:
+    body = {
+        key: value
+        for key, value in document.items()
+        if key not in {"plan_id", "created_at", "plan_hash"}
+    }
+    return hashlib.sha256(canonical_json(body).encode()).hexdigest()
+
+
 def redact(value: Any) -> Any:
     if isinstance(value, dict):
         return {
@@ -64,7 +73,7 @@ class SQLiteStore:
         with self._connection() as db:
             db.execute("PRAGMA journal_mode=WAL")
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2, 3):
+            if version not in (0, 1, 2, 3, 4):
                 raise ConfigurationError(f"unsupported RunbookOS database version: {version}")
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS plans (
@@ -196,16 +205,43 @@ class SQLiteStore:
                 );
                 CREATE INDEX IF NOT EXISTS webhook_nonces_timestamp_idx ON webhook_nonces(timestamp);
             """
-            db.execute("BEGIN IMMEDIATE")
-            try:
-                for statement in migration.split(";"):
-                    if statement.strip():
-                        db.execute(statement)
-                db.execute("PRAGMA user_version=3")
-                db.commit()
-            except Exception:
-                db.rollback()
-                raise
+            if version < 3:
+                db.execute("BEGIN IMMEDIATE")
+                try:
+                    for statement in migration.split(";"):
+                        if statement.strip():
+                            db.execute(statement)
+                    db.execute("PRAGMA user_version=3")
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    raise
+            if version < 4:
+                remediation_links = """
+                    CREATE TABLE IF NOT EXISTS incident_remediation_plans (
+                        association_id TEXT PRIMARY KEY,
+                        incident_id TEXT NOT NULL REFERENCES incidents(incident_id),
+                        plan_id TEXT NOT NULL UNIQUE REFERENCES plans(plan_id),
+                        plan_hash TEXT NOT NULL,
+                        target TEXT NOT NULL,
+                        action_id TEXT NOT NULL,
+                        actor TEXT NOT NULL,
+                        associated_at TEXT NOT NULL,
+                        UNIQUE(incident_id, plan_id)
+                    );
+                    CREATE INDEX IF NOT EXISTS incident_remediation_incident_idx
+                        ON incident_remediation_plans(incident_id, associated_at);
+                """
+                db.execute("BEGIN IMMEDIATE")
+                try:
+                    for statement in remediation_links.split(";"):
+                        if statement.strip():
+                            db.execute(statement)
+                    db.execute("PRAGMA user_version=4")
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    raise
 
     def _audit(self, db: sqlite3.Connection, kind: str, payload: dict[str, Any]) -> None:
         prior = db.execute(

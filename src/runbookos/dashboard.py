@@ -387,6 +387,45 @@ def serve_dashboard(
                     investigations.append(
                         f"<li>Investigation {_e(item['investigation_id'])}; executions: {_e(', '.join(item['execution_ids']) or 'none')}; evidence refs: {_e(', '.join(item['evidence_refs']) or 'none')} <span class='muted'>(verified references only; evidence payload omitted)</span></li>"
                     )
+                remediation_rows = []
+                for item in detail["remediation_plans"]:
+                    executions = (
+                        ", ".join(
+                            f"{run['execution_id']} · {run['outcome'] or run['status']} · "
+                            f"{run['finished_at'] or run['started_at']}"
+                            for run in item["executions"]
+                        )
+                        or "none"
+                    )
+                    warning = (
+                        "<strong>UNKNOWN outcome: inspect target independently before considering another action.</strong>"
+                        if item["unknown_outcome_warning"]
+                        else ""
+                    )
+                    if item["plan_integrity"] != "valid":
+                        warning += " <strong>Stored plan integrity mismatch.</strong>"
+                    preflight = (
+                        ", ".join(
+                            f"{check['step_id']} ({check['action_id']}, {check['assertion_count']} assertions)"
+                            for check in item["preflight"]
+                        )
+                        or "none"
+                    )
+                    postflight = (
+                        ", ".join(
+                            f"{check['step_id']} ({check['action_id']}, {check['assertion_count']} assertions)"
+                            for check in item["postflight"]
+                        )
+                        or "none"
+                    )
+                    remediation_rows.append(
+                        "<li>"
+                        f"Plan {_e(item['plan_id'])} · hash {_e(item['plan_hash'])} · integrity {_e(item['plan_integrity'])}<br>"
+                        f"Target/action: {_e(item['target'])} / {_e(item['action_id'])}; associated by {_e(item['actor'])} at {_e(item['associated_at'])}<br>"
+                        f"Approval: {_e(item['approval']['state'])}; last execution: {_e(item['last_execution_at'] or 'none')}<br>"
+                        f"Preflight: {_e(preflight)}; postflight: {_e(postflight)}<br>"
+                        f"Executions: {_e(executions)} {warning}</li>"
+                    )
                 controls = _controls(detail, session.csrf)
                 valid, count = state.incidents.store.verify_audit_chain()
                 audit = f"VALID · {count} events" if valid else f"INVALID · verified prefix {count}"
@@ -394,6 +433,7 @@ def serve_dashboard(
                     f"<article><p><strong>{_e(detail['severity'].upper())}</strong> · {_e(detail['status'])}</p><p>{_e(detail['summary'])}</p>"
                     f"<dl><dt>Target / service</dt><dd>{_e(detail['target_alias'])} / {_e(detail['service'])}</dd><dt>Category</dt><dd>{_e(detail['category'])}</dd><dt>Created / updated</dt><dd>{_e(detail['created_at'])} / {_e(detail['updated_at'])}</dd><dt>Audit chain</dt><dd>{_e(audit)}</dd></dl></article>"
                     f"<h2>Alert correlation</h2><ul>{links}</ul><h2>Linked investigations</h2><ul>{''.join(investigations) or '<li>None</li>'}</ul>"
+                    f"<h2>Remediation review (read-only)</h2><ul>{''.join(remediation_rows) or '<li>No remediation plans associated.</li>'}</ul>"
                     f"<h2>Incident timeline</h2><table><tr><th>Time</th><th>Event</th><th>Actor</th><th>Reason</th><th>Evidence status</th><th>Status transition</th></tr>{events}</table>{controls}"
                 )
                 self.send_page(200, f"Incident {incident_id}", body)

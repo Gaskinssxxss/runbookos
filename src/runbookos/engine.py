@@ -15,7 +15,7 @@ from .errors import ApprovalError, ConfigurationError, ExecutionUnknown, PolicyD
 from .models import Assertion, PlanAction, PlanDocument, RemediationOutcome, Runbook
 from .remote import REMOTE_SOURCE
 from .ssh import SSHAdapter, SSHResult
-from .store import SQLiteStore, canonical_json
+from .store import SQLiteStore, canonical_json, plan_document_hash
 
 _RANK = {"low": 0, "medium": 1, "high": 2}
 _PARAM_REF = re.compile(r"^\$param\.([a-z][a-z0-9_]*)$")
@@ -235,12 +235,7 @@ def _source_hashes(runbook_path: Path, paths: Paths) -> dict[str, str]:
 
 
 def _plan_hash(document: dict[str, Any]) -> str:
-    body = {
-        key: value
-        for key, value in document.items()
-        if key not in {"plan_id", "created_at", "plan_hash"}
-    }
-    return hashlib.sha256(canonical_json(body).encode()).hexdigest()
+    return plan_document_hash(document)
 
 
 class RunbookEngine:

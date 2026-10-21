@@ -41,8 +41,8 @@ jobs:
               assert any(name.endswith("runbookos/dashboard.py") for name in names)
               assert any(name.endswith("runbookos/adapters/alertmanager_bridge.py") for name in names)
               assert any(name.endswith("share/runbookos/examples/alertmanager/receiver.example.yml") for name in names)
-              assert any(name.endswith("runbookos-0.5.0.dist-info/entry_points.txt") for name in names)
-              assert any(name.endswith("runbookos-0.5.0.dist-info/METADATA") for name in names)
+              assert any(name.endswith("runbookos-0.6.0.dist-info/entry_points.txt") for name in names)
+              assert any(name.endswith("runbookos-0.6.0.dist-info/METADATA") for name in names)
               assert not any("homelab" in name for name in names)
               assert not any("reports/" in name or ".sqlite" in name for name in names)
           with tar_open(sdist, "r:gz") as archive:
@@ -60,6 +60,9 @@ jobs:
               assert any(name.endswith("/docs/implementation-report-v0.5.0.md") for name in names)
               assert any(name.endswith("/docs/remediation-acceptance-v0.5.0.md") for name in names)
               assert any(name.endswith("/docs/disposable-remediation-approval-v0.5.0.yml") for name in names)
+              assert any(name.endswith("/docs/implementation-report-v0.6.0.md") for name in names)
+              assert any(name.endswith("/docs/workflow-security-v0.6.0.md") for name in names)
+              assert any(name.endswith("/tests/test_incident_remediation.py") for name in names)
               assert any(name.endswith("/examples/runbooks/disposable-systemd-restart.yml") for name in names)
               assert any(name.endswith("/tests/test_store_ssh.py") for name in names)
               assert any(name.endswith("/tests/test_remediation.py") for name in names)
@@ -76,6 +79,6 @@ jobs:
       - name: Verify installed wheel version parity
         run: |
           python -m pip uninstall -y runbookos
-          python -m pip install --no-deps dist/runbookos-0.5.0-py3-none-any.whl
-          python -c 'from importlib.metadata import version; import runbookos; assert version("runbookos") == runbookos.__version__ == "0.5.0"'
+          python -m pip install --no-deps dist/runbookos-0.6.0-py3-none-any.whl
+          python -c 'from importlib.metadata import version; import runbookos; assert version("runbookos") == runbookos.__version__ == "0.6.0"'
           runbookos version
