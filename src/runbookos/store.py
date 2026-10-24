@@ -14,7 +14,16 @@ from typing import Any
 from .errors import ApprovalError, ConfigurationError
 
 _ZERO_HASH = "0" * 64
-_SECRET_KEYS = ("password", "secret", "token", "credential", "private_key", "authorization")
+_SECRET_KEYS = (
+    "password",
+    "secret",
+    "token",
+    "credential",
+    "private_key",
+    "api_key",
+    "api-key",
+    "authorization",
+)
 
 
 def canonical_json(value: Any) -> str:
@@ -556,11 +565,18 @@ class SQLiteStore:
             for row in rows
         )
 
-    def create_investigation(self, result: dict[str, Any]) -> str:
+    def create_investigation(
+        self, result: dict[str, Any], *, investigation_id: str | None = None
+    ) -> str:
         """Persist investigation output and append a compact, content-addressed audit event."""
         from datetime import datetime
 
-        investigation_id = str(uuid.uuid4())
+        investigation_id = investigation_id or str(uuid.uuid4())
+        assessment = result.get("assessment")
+        if isinstance(assessment, dict) and assessment.get("investigation_id") != investigation_id:
+            raise ConfigurationError(
+                "assessment investigation ID does not match its storage record"
+            )
         created_at = datetime.now(UTC).isoformat()
         clean = redact(result)
         result_json = canonical_json(clean)
@@ -604,3 +620,39 @@ class SQLiteStore:
                 (limit,),
             ).fetchall()
         return [dict(row) | {"result": json.loads(row["result_json"])} for row in rows]
+
+    def investigation_detail(self, investigation_id: str) -> dict[str, Any] | None:
+        """Read one persisted investigation and its content-hash audit status."""
+        with self._connection() as db:
+            row = db.execute(
+                "SELECT investigation_id,status,created_at,incident_sha256,result_json "
+                "FROM investigations WHERE investigation_id=?",
+                (investigation_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            result_hash = hashlib.sha256(row["result_json"].encode("utf-8")).hexdigest()
+            audited = False
+            for event in db.execute(
+                "SELECT payload_json FROM audit_events "
+                "WHERE kind='investigation.completed' ORDER BY sequence"
+            ):
+                try:
+                    payload = json.loads(event["payload_json"])
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if (
+                    isinstance(payload, dict)
+                    and payload.get("investigation_id") == investigation_id
+                    and payload.get("result_sha256") == result_hash
+                ):
+                    audited = True
+                    break
+        try:
+            result = json.loads(row["result_json"])
+        except (json.JSONDecodeError, TypeError):
+            result = None
+        return dict(row) | {
+            "result": result,
+            "result_integrity": "valid" if audited else "mismatch_or_missing_audit",
+        }

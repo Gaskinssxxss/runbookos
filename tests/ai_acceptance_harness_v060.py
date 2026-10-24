@@ -242,6 +242,7 @@ def trace_investigation(trace: InvestigationTrace) -> Iterator[None]:
     original_parse = ai._parse_selection
     original_decode = ai._decode_model_json
     original_restore = ai._restore_evidence_refs
+    original_restore_assessment = ai._restore_assessment_refs
     original_sanitize = ai._sanitize_report
     original_plan = RunbookEngine.plan
     original_execute = RunbookEngine.execute
@@ -284,6 +285,18 @@ def trace_investigation(trace: InvestigationTrace) -> Iterator[None]:
         trace.evidence_validation = "citation_references_validated"
         return result
 
+    def restored_assessment(analysis: Any, aliases: Any) -> Any:
+        trace.stage = "evidence_reference_validation"
+        try:
+            result = original_restore_assessment(analysis, aliases)
+        except Exception as exc:
+            trace.evidence_validation = "rejected"
+            trace.exception_type = type(exc).__name__
+            trace.reason_category = _reason_category(exc)
+            raise
+        trace.evidence_validation = "citation_references_validated"
+        return result
+
     def sanitized(analysis: Any, valid_refs: Any) -> Any:
         trace.stage = "evidence_claim_validation"
         try:
@@ -316,9 +329,9 @@ def trace_investigation(trace: InvestigationTrace) -> Iterator[None]:
         trace.plan_policy_validation.append({"runbook_id": result.runbook_id, "outcome": outcome})
         return result
 
-    def persisted(instance: SQLiteStore, result: dict[str, Any]) -> Any:
+    def persisted(instance: SQLiteStore, result: dict[str, Any], **kwargs: Any) -> Any:
         trace.stage = "investigation_persistence"
-        value = original_create(instance, result)
+        value = original_create(instance, result, **kwargs)
         trace.investigation_persisted = True
         trace.stage = "completed"
         return value
@@ -331,6 +344,7 @@ def trace_investigation(trace: InvestigationTrace) -> Iterator[None]:
         patch.object(ai, "_parse_selection", parsed),
         patch.object(ai, "_decode_model_json", decoded),
         patch.object(ai, "_restore_evidence_refs", restored),
+        patch.object(ai, "_restore_assessment_refs", restored_assessment),
         patch.object(ai, "_sanitize_report", sanitized),
         patch.object(RunbookEngine, "plan", planned),
         patch.object(RunbookEngine, "execute", executed),

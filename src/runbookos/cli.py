@@ -16,6 +16,7 @@ from .ai import (
     build_provider,
     load_investigation_config,
 )
+from .assessment import project_investigation_assessment
 from .blind_review import export_blind_review, reviewer_agreement
 from .config import load_inventory, load_runbook, load_ssh_profiles
 from .dashboard import create_auth_file, serve_dashboard
@@ -457,7 +458,26 @@ def incidents_list(
 @incidents_app.command("show")
 def incident_show(ctx: typer.Context, incident_id: str) -> None:
     try:
-        _json(IncidentStore(SQLiteStore(ctx.obj.database)).show(incident_id))
+        manager = IncidentStore(SQLiteStore(ctx.obj.database))
+        incident = manager.show(incident_id)
+        digest = hashlib.sha256(incident["summary"].encode()).hexdigest()
+        valid, count = manager.store.verify_audit_chain()
+        reviews = []
+        for link in incident["investigations"]:
+            record = manager.store.investigation_detail(link["investigation_id"])
+            if not valid and record is not None:
+                record = record | {"result_integrity": "mismatch_or_missing_audit"}
+            projection = project_investigation_assessment(
+                record,
+                incident_id=incident_id,
+                incident_summary_sha256=digest,
+                linked=True,
+            )
+            reviews.append(projection)
+        incident["investigation_assessments"] = reviews
+        incident["latest_investigation_assessment"] = reviews[-1] if reviews else None
+        incident["assessment_review_audit"] = {"valid": valid, "event_count": count}
+        _json(incident)
     except Exception as exc:
         _fail(exc)
 
@@ -606,7 +626,7 @@ def incident_investigate(
                 config_dir,
                 build_provider(config.provider),
                 allowed_targets={incident["target_alias"]},
-            ).investigate(alert_summary)
+            ).investigate(alert_summary, incident_id=incident_id)
             evidence = result.get("verified_evidence", [])
             manager.link_investigation(
                 incident_id,

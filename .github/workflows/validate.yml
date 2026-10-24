@@ -41,8 +41,10 @@ jobs:
               assert any(name.endswith("runbookos/dashboard.py") for name in names)
               assert any(name.endswith("runbookos/adapters/alertmanager_bridge.py") for name in names)
               assert any(name.endswith("share/runbookos/examples/alertmanager/receiver.example.yml") for name in names)
-              assert any(name.endswith("runbookos-0.6.0.dist-info/entry_points.txt") for name in names)
-              assert any(name.endswith("runbookos-0.6.0.dist-info/METADATA") for name in names)
+              assert any(name.endswith("runbookos-0.7.0.dist-info/entry_points.txt") for name in names)
+              assert any(name.endswith("runbookos-0.7.0.dist-info/METADATA") for name in names)
+              assert any(name.endswith("runbookos/assessment.py") for name in names)
+              assert any(name.endswith("runbookos/assessment_evaluation.py") for name in names)
               assert not any("homelab" in name for name in names)
               assert not any("reports/" in name or ".sqlite" in name for name in names)
           with tar_open(sdist, "r:gz") as archive:
@@ -65,6 +67,11 @@ jobs:
               assert any(name.endswith("/tests/test_incident_remediation.py") for name in names)
               assert any(name.endswith("/examples/runbooks/disposable-systemd-restart.yml") for name in names)
               assert any(name.endswith("/tests/test_store_ssh.py") for name in names)
+              assert any(name.endswith("/tests/test_m5_integrated_release.py") for name in names)
+              assert any(name.endswith("/tests/fixtures/assessment_m3/heldout-v1.json") for name in names)
+              assert any(name.endswith("/tests/fixtures/assessment_m3/taxonomy-v2.yml") for name in names)
+              assert any(name.endswith("/docs/v0.7.0-m5-release-acceptance.md") for name in names)
+              assert not any(name.endswith("/scripts/ai-local-acceptance-v060.py") for name in names)
               assert any(name.endswith("/tests/test_remediation.py") for name in names)
               assert any(name.endswith("/scripts/staging-v032.py") for name in names)
               assert any(name.endswith("/tests/test_alertmanager_bridge.py") for name in names)
@@ -79,6 +86,6 @@ jobs:
       - name: Verify installed wheel version parity
         run: |
           python -m pip uninstall -y runbookos
-          python -m pip install --no-deps dist/runbookos-0.6.0-py3-none-any.whl
-          python -c 'from importlib.metadata import version; import runbookos; assert version("runbookos") == runbookos.__version__ == "0.6.0"'
+          python -m pip install --no-deps dist/runbookos-0.7.0-py3-none-any.whl
+          python -c 'from importlib.metadata import version; import runbookos; assert version("runbookos") == runbookos.__version__ == "0.7.0"'
           runbookos version

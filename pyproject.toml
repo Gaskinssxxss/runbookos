@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "runbookos"
-version = "0.6.0"
+version = "0.7.0"
 description = "A safe, auditable runbook and infrastructure diagnostic evaluation engine"
 readme = "README.md"
 requires-python = ">=3.11"

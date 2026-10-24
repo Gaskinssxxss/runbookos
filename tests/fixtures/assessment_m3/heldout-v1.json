@@ -1,0 +1,877 @@
+{
+  "schema_version": 1,
+  "dataset_version": "m3-1.0",
+  "assessment_schema_version": 1,
+  "classification_catalog_version": 2,
+  "diagnostic_catalog_version": 1,
+  "cases": [
+    {
+      "case_id": "web-normal-01",
+      "category": "web",
+      "input": {
+        "incident_id": "synthetic-web-normal-01",
+        "incident_summary": "HTTP readiness and service state are normal.",
+        "observations": [
+          {
+            "evidence_id": "syn:web-normal-01:1",
+            "diagnostic_id": "web_health",
+            "observed_result": {
+              "http_status": 200
+            }
+          }
+        ],
+        "diagnostic_catalog": {
+          "web_health": "Checks synthetic web service readiness.",
+          "application_health": "Checks synthetic application service state.",
+          "database_health": "Checks synthetic database protocol availability.",
+          "network_health": "Checks synthetic routing and TCP reachability."
+        }
+      },
+      "gold": {
+        "expected_diagnostic_ids": [
+          "web_health"
+        ],
+        "classification": "healthy",
+        "reference_evidence_ids": [
+          "syn:web-normal-01:1"
+        ],
+        "expected_abstention": false,
+        "semantic_test_claims": [],
+        "annotation_rationale": "The synthetic observation directly records expected behavior for the scoped diagnostic."
+      },
+      "case_type": "normal"
+    },
+    {
+      "case_id": "web-failure-01",
+      "category": "web",
+      "input": {
+        "incident_id": "synthetic-web-failure-01",
+        "incident_summary": "Readiness check reports an unavailable web service.",
+        "observations": [
+          {
+            "evidence_id": "syn:web-failure-01:1",
+            "diagnostic_id": "web_health",
+            "observed_result": {
+              "http_status": 503
+            }
+          }
+        ],
+        "diagnostic_catalog": {
+          "web_health": "Checks synthetic web service readiness.",
+          "application_health": "Checks synthetic application service state.",
+          "database_health": "Checks synthetic database protocol availability.",
+          "network_health": "Checks synthetic routing and TCP reachability."
+        }
+      },
+      "gold": {
+        "expected_diagnostic_ids": [
+          "web_health"
+        ],
+        "classification": "service_failure",
+        "reference_evidence_ids": [
+          "syn:web-failure-01:1"
+        ],
+        "expected_abstention": false,
+        "semantic_test_claims": [],
+        "annotation_rationale": "The synthetic observation directly records local service unavailability or failed readiness."
+      },
+      "case_type": "failure"
+    },
+    {
+      "case_id": "web-failure-02",
+      "category": "web",
+      "input": {
+        "incident_id": "synthetic-web-failure-02",
+        "incident_summary": "The web service unit is inactive.",
+        "observations": [
+          {
+            "evidence_id": "syn:web-failure-02:1",
+            "diagnostic_id": "web_health",
+            "observed_result": {
+              "active": false
+            }
+          }
+        ],
+        "diagnostic_catalog": {
+          "web_health": "Checks synthetic web service readiness.",
+          "application_health": "Checks synthetic application service state.",
+          "database_health": "Checks synthetic database protocol availability.",
+          "network_health": "Checks synthetic routing and TCP reachability."
+        }
+      },
+      "gold": {
+        "expected_diagnostic_ids": [
+          "web_health"
+        ],
+        "classification": "service_failure",
+        "reference_evidence_ids": [
+          "syn:web-failure-02:1"
+        ],
+        "expected_abstention": false,
+        "semantic_test_claims": [],
+        "annotation_rationale": "The synthetic observation directly records local service unavailability or failed readiness."
+      },
+      "case_type": "failure"
+    },
+    {
+      "case_id": "web-conflict-01",
+      "category": "web",
+      "input": {
+        "incident_id": "synthetic-web-conflict-01",
+        "incident_summary": "One observation says healthy and another says unavailable.",
+        "observations": [
+          {
+            "evidence_id": "syn:web-conflict-01:1",
+            "diagnostic_id": "web_health",
+            "observed_result": {
+              "http_status": 200
+            }
+          },
+          {
+            "evidence_id": "syn:web-conflict-01:2",
+            "diagnostic_id": "web_health",
+            "observed_result": {
+              "http_status": 503
+            }
+          }
+        ],
+        "diagnostic_catalog": {
+          "web_health": "Checks synthetic web service readiness.",
+          "application_health": "Checks synthetic application service state.",
+          "database_health": "Checks synthetic database protocol availability.",
+          "network_health": "Checks synthetic routing and TCP reachability."
+        }
+      },
+      "gold": {
+        "expected_diagnostic_ids": [
+          "web_health"
+        ],
+        "classification": "unknown",
+        "reference_evidence_ids": [
+          "syn:web-conflict-01:1",
+          "syn:web-conflict-01:2"
+        ],
+        "expected_abstention": true,
+        "semantic_test_claims": [],
+        "annotation_rationale": "Evidence is absent, conflicting, or too weak to establish a specific diagnosis; abstention is expected."
+      },
+      "case_type": "conflicting"
+    },
+    {
+      "case_id": "web-ambiguous-01",
+      "category": "web",
+      "input": {
+        "incident_id": "synthetic-web-ambiguous-01",
+        "incident_summary": "A single intermittent timeout has no corroboration.",
+        "observations": [
+          {
+            "evidence_id": "syn:web-ambiguous-01:1",
+            "diagnostic_id": "web_health",
+            "observed_result": {
+              "timeout_count": 1
+            }
+          }
+        ],
+        "diagnostic_catalog": {
+          "web_health": "Checks synthetic web service readiness.",
+          "application_health": "Checks synthetic application service state.",
+          "database_health": "Checks synthetic database protocol availability.",
+          "network_health": "Checks synthetic routing and TCP reachability."
+        }
+      },
+      "gold": {
+        "expected_diagnostic_ids": [
+          "web_health"
+        ],
+        "classification": null,
+        "reference_evidence_ids": [
+          "syn:web-ambiguous-01:1"
+        ],
+        "expected_abstention": true,
+        "semantic_test_claims": [],
+        "annotation_rationale": "Evidence is absent, conflicting, or too weak to establish a specific diagnosis; abstention is expected."
+      },
+      "case_type": "ambiguous"
+    },
+    {
+      "case_id": "app-normal-01",
+      "category": "application",
+      "input": {
+        "incident_id": "synthetic-app-normal-01",
+        "incident_summary": "Application readiness and worker state are normal.",
+        "observations": [
+          {
+            "evidence_id": "syn:app-normal-01:1",
+            "diagnostic_id": "application_health",
+            "observed_result": {
+              "ready": true
+            }
+          }
+        ],
+        "diagnostic_catalog": {
+          "web_health": "Checks synthetic web service readiness.",
+          "application_health": "Checks synthetic application service state.",
+          "database_health": "Checks synthetic database protocol availability.",
+          "network_health": "Checks synthetic routing and TCP reachability."
+        }
+      },
+      "gold": {
+        "expected_diagnostic_ids": [
+          "application_health"
+        ],
+        "classification": "healthy",
+        "reference_evidence_ids": [
+          "syn:app-normal-01:1"
+        ],
+        "expected_abstention": false,
+        "semantic_test_claims": [],
+        "annotation_rationale": "The synthetic observation directly records expected behavior for the scoped diagnostic."
+      },
+      "case_type": "normal"
+    },
+    {
+      "case_id": "app-failure-01",
+      "category": "application",
+      "input": {
+        "incident_id": "synthetic-app-failure-01",
+        "incident_summary": "Application readiness endpoint returned failure.",
+        "observations": [
+          {
+            "evidence_id": "syn:app-failure-01:1",
+            "diagnostic_id": "application_health",
+            "observed_result": {
+              "http_status": 500
+            }
+          }
+        ],
+        "diagnostic_catalog": {
+          "web_health": "Checks synthetic web service readiness.",
+          "application_health": "Checks synthetic application service state.",
+          "database_health": "Checks synthetic database protocol availability.",
+          "network_health": "Checks synthetic routing and TCP reachability."
+        }
+      },
+      "gold": {
+        "expected_diagnostic_ids": [
+          "application_health"
+        ],
+        "classification": "service_failure",
+        "reference_evidence_ids": [
+          "syn:app-failure-01:1"
+        ],
+        "expected_abstention": false,
+        "semantic_test_claims": [],
+        "annotation_rationale": "The synthetic observation directly records local service unavailability or failed readiness."
+      },
+      "case_type": "failure"
+    },
+    {
+      "case_id": "app-failure-02",
+      "category": "application",
+      "input": {
+        "incident_id": "synthetic-app-failure-02",
+        "incident_summary": "Application process is not active.",
+        "observations": [
+          {
+            "evidence_id": "syn:app-failure-02:1",
+            "diagnostic_id": "application_health",
+            "observed_result": {
+              "active": false
+            }
+          }
+        ],
+        "diagnostic_catalog": {
+          "web_health": "Checks synthetic web service readiness.",
+          "application_health": "Checks synthetic application service state.",
+          "database_health": "Checks synthetic database protocol availability.",
+          "network_health": "Checks synthetic routing and TCP reachability."
+        }
+      },
+      "gold": {
+        "expected_diagnostic_ids": [
+          "application_health"
+        ],
+        "classification": "service_failure",
+        "reference_evidence_ids": [
+          "syn:app-failure-02:1"
+        ],
+        "expected_abstention": false,
+        "semantic_test_claims": [],
+        "annotation_rationale": "The synthetic observation directly records local service unavailability or failed readiness."
+      },
+      "case_type": "failure"
+    },
+    {
+      "case_id": "app-ambiguous-01",
+      "category": "application",
+      "input": {
+        "incident_id": "synthetic-app-ambiguous-01",
+        "incident_summary": "A request was slow once but no other signal exists.",
+        "observations": [
+          {
+            "evidence_id": "syn:app-ambiguous-01:1",
+            "diagnostic_id": "application_health",
+            "observed_result": {
+              "latency_ms": 2100
+            }
+          }
+        ],
+        "diagnostic_catalog": {
+          "web_health": "Checks synthetic web service readiness.",
+          "application_health": "Checks synthetic application service state.",
+          "database_health": "Checks synthetic database protocol availability.",
+          "network_health": "Checks synthetic routing and TCP reachability."
+        }
+      },
+      "gold": {
+        "expected_diagnostic_ids": [
+          "application_health"
+        ],
+        "classification": null,
+        "reference_evidence_ids": [
+          "syn:app-ambiguous-01:1"
+        ],
+        "expected_abstention": true,
+        "semantic_test_claims": [],
+        "annotation_rationale": "Evidence is absent, conflicting, or too weak to establish a specific diagnosis; abstention is expected."
+      },
+      "case_type": "ambiguous"
+    },
+    {
+      "case_id": "db-normal-01",
+      "category": "database",
+      "input": {
+        "incident_id": "synthetic-db-normal-01",
+        "incident_summary": "Database protocol negotiation succeeded.",
+        "observations": [
+          {
+            "evidence_id": "syn:db-normal-01:1",
+            "diagnostic_id": "database_health",
+            "observed_result": {
+              "protocol_available": true
+            }
+          }
+        ],
+        "diagnostic_catalog": {
+          "web_health": "Checks synthetic web service readiness.",
+          "application_health": "Checks synthetic application service state.",
+          "database_health": "Checks synthetic database protocol availability.",
+          "network_health": "Checks synthetic routing and TCP reachability."
+        }
+      },
+      "gold": {
+        "expected_diagnostic_ids": [
+          "database_health"
+        ],
+        "classification": "healthy",
+        "reference_evidence_ids": [
+          "syn:db-normal-01:1"
+        ],
+        "expected_abstention": false,
+        "semantic_test_claims": [],
+        "annotation_rationale": "The synthetic observation directly records expected behavior for the scoped diagnostic."
+      },
+      "case_type": "normal"
+    },
+    {
+      "case_id": "db-failure-01",
+      "category": "database",
+      "input": {
+        "incident_id": "synthetic-db-failure-01",
+        "incident_summary": "Database TCP connection was refused.",
+        "observations": [
+          {
+            "evidence_id": "syn:db-failure-01:1",
+            "diagnostic_id": "database_health",
+            "observed_result": {
+              "tcp_connect": false
+            }
+          }
+        ],
+        "diagnostic_catalog": {
+          "web_health": "Checks synthetic web service readiness.",
+          "application_health": "Checks synthetic application service state.",
+          "database_health": "Checks synthetic database protocol availability.",
+          "network_health": "Checks synthetic routing and TCP reachability."
+        }
+      },
+      "gold": {
+        "expected_diagnostic_ids": [
+          "database_health"
+        ],
+        "classification": "connectivity_failure",
+        "reference_evidence_ids": [
+          "syn:db-failure-01:1"
+        ],
+        "expected_abstention": false,
+        "semantic_test_claims": [],
+        "annotation_rationale": "The synthetic transport or protocol observation failed; it does not establish application-level cause."
+      },
+      "case_type": "failure"
+    },
+    {
+      "case_id": "db-failure-02",
+      "category": "database",
+      "input": {
+        "incident_id": "synthetic-db-failure-02",
+        "incident_summary": "PostgreSQL SSLRequest was rejected.",
+        "observations": [
+          {
+            "evidence_id": "syn:db-failure-02:1",
+            "diagnostic_id": "database_health",
+            "observed_result": {
+              "ssl_request": false
+            }
+          }
+        ],
+        "diagnostic_catalog": {
+          "web_health": "Checks synthetic web service readiness.",
+          "application_health": "Checks synthetic application service state.",
+          "database_health": "Checks synthetic database protocol availability.",
+          "network_health": "Checks synthetic routing and TCP reachability."
+        }
+      },
+      "gold": {
+        "expected_diagnostic_ids": [
+          "database_health"
+        ],
+        "classification": "connectivity_failure",
+        "reference_evidence_ids": [
+          "syn:db-failure-02:1"
+        ],
+        "expected_abstention": false,
+        "semantic_test_claims": [],
+        "annotation_rationale": "The synthetic transport or protocol observation failed; it does not establish application-level cause."
+      },
+      "case_type": "failure"
+    },
+    {
+      "case_id": "db-conflict-01",
+      "category": "database",
+      "input": {
+        "incident_id": "synthetic-db-conflict-01",
+        "incident_summary": "Protocol check succeeded while reachability check failed.",
+        "observations": [
+          {
+            "evidence_id": "syn:db-conflict-01:1",
+            "diagnostic_id": "database_health",
+            "observed_result": {
+              "protocol_available": true
+            }
+          },
+          {
+            "evidence_id": "syn:db-conflict-01:2",
+            "diagnostic_id": "database_health",
+            "observed_result": {
+              "protocol_available": false
+            }
+          }
+        ],
+        "diagnostic_catalog": {
+          "web_health": "Checks synthetic web service readiness.",
+          "application_health": "Checks synthetic application service state.",
+          "database_health": "Checks synthetic database protocol availability.",
+          "network_health": "Checks synthetic routing and TCP reachability."
+        }
+      },
+      "gold": {
+        "expected_diagnostic_ids": [
+          "database_health"
+        ],
+        "classification": "unknown",
+        "reference_evidence_ids": [
+          "syn:db-conflict-01:1",
+          "syn:db-conflict-01:2"
+        ],
+        "expected_abstention": true,
+        "semantic_test_claims": [],
+        "annotation_rationale": "Evidence is absent, conflicting, or too weak to establish a specific diagnosis; abstention is expected."
+      },
+      "case_type": "conflicting"
+    },
+    {
+      "case_id": "network-normal-01",
+      "category": "network",
+      "input": {
+        "incident_id": "synthetic-network-normal-01",
+        "incident_summary": "Expected local route is present.",
+        "observations": [
+          {
+            "evidence_id": "syn:network-normal-01:1",
+            "diagnostic_id": "network_health",
+            "observed_result": {
+              "route_present": true
+            }
+          }
+        ],
+        "diagnostic_catalog": {
+          "web_health": "Checks synthetic web service readiness.",
+          "application_health": "Checks synthetic application service state.",
+          "database_health": "Checks synthetic database protocol availability.",
+          "network_health": "Checks synthetic routing and TCP reachability."
+        }
+      },
+      "gold": {
+        "expected_diagnostic_ids": [
+          "network_health"
+        ],
+        "classification": "healthy",
+        "reference_evidence_ids": [
+          "syn:network-normal-01:1"
+        ],
+        "expected_abstention": false,
+        "semantic_test_claims": [],
+        "annotation_rationale": "The synthetic observation directly records expected behavior for the scoped diagnostic."
+      },
+      "case_type": "normal"
+    },
+    {
+      "case_id": "network-failure-01",
+      "category": "network",
+      "input": {
+        "incident_id": "synthetic-network-failure-01",
+        "incident_summary": "Route to the synthetic service is absent.",
+        "observations": [
+          {
+            "evidence_id": "syn:network-failure-01:1",
+            "diagnostic_id": "network_health",
+            "observed_result": {
+              "route_present": false
+            }
+          }
+        ],
+        "diagnostic_catalog": {
+          "web_health": "Checks synthetic web service readiness.",
+          "application_health": "Checks synthetic application service state.",
+          "database_health": "Checks synthetic database protocol availability.",
+          "network_health": "Checks synthetic routing and TCP reachability."
+        }
+      },
+      "gold": {
+        "expected_diagnostic_ids": [
+          "network_health"
+        ],
+        "classification": "network_failure",
+        "reference_evidence_ids": [
+          "syn:network-failure-01:1"
+        ],
+        "expected_abstention": false,
+        "semantic_test_claims": [],
+        "annotation_rationale": "The synthetic route or network observation directly supports this network-state label."
+      },
+      "case_type": "failure"
+    },
+    {
+      "case_id": "network-failure-02",
+      "category": "network",
+      "input": {
+        "incident_id": "synthetic-network-failure-02",
+        "incident_summary": "Synthetic TCP reachability check timed out.",
+        "observations": [
+          {
+            "evidence_id": "syn:network-failure-02:1",
+            "diagnostic_id": "network_health",
+            "observed_result": {
+              "tcp_reachable": false
+            }
+          }
+        ],
+        "diagnostic_catalog": {
+          "web_health": "Checks synthetic web service readiness.",
+          "application_health": "Checks synthetic application service state.",
+          "database_health": "Checks synthetic database protocol availability.",
+          "network_health": "Checks synthetic routing and TCP reachability."
+        }
+      },
+      "gold": {
+        "expected_diagnostic_ids": [
+          "network_health"
+        ],
+        "classification": "connectivity_failure",
+        "reference_evidence_ids": [
+          "syn:network-failure-02:1"
+        ],
+        "expected_abstention": false,
+        "semantic_test_claims": [],
+        "annotation_rationale": "The synthetic transport or protocol observation failed; it does not establish application-level cause."
+      },
+      "case_type": "failure"
+    },
+    {
+      "case_id": "network-ambiguous-01",
+      "category": "network",
+      "input": {
+        "incident_id": "synthetic-network-ambiguous-01",
+        "incident_summary": "One probe timed out; no route or peer evidence exists.",
+        "observations": [
+          {
+            "evidence_id": "syn:network-ambiguous-01:1",
+            "diagnostic_id": "network_health",
+            "observed_result": {
+              "timeout_count": 1
+            }
+          }
+        ],
+        "diagnostic_catalog": {
+          "web_health": "Checks synthetic web service readiness.",
+          "application_health": "Checks synthetic application service state.",
+          "database_health": "Checks synthetic database protocol availability.",
+          "network_health": "Checks synthetic routing and TCP reachability."
+        }
+      },
+      "gold": {
+        "expected_diagnostic_ids": [
+          "network_health"
+        ],
+        "classification": null,
+        "reference_evidence_ids": [
+          "syn:network-ambiguous-01:1"
+        ],
+        "expected_abstention": true,
+        "semantic_test_claims": [],
+        "annotation_rationale": "Evidence is absent, conflicting, or too weak to establish a specific diagnosis; abstention is expected."
+      },
+      "case_type": "ambiguous"
+    },
+    {
+      "case_id": "insufficient-empty-01",
+      "category": "insufficient_evidence",
+      "input": {
+        "incident_id": "synthetic-insufficient-empty-01",
+        "incident_summary": "No diagnostic observations are available.",
+        "observations": [],
+        "diagnostic_catalog": {
+          "web_health": "Checks synthetic web service readiness.",
+          "application_health": "Checks synthetic application service state.",
+          "database_health": "Checks synthetic database protocol availability.",
+          "network_health": "Checks synthetic routing and TCP reachability."
+        }
+      },
+      "gold": {
+        "expected_diagnostic_ids": [],
+        "classification": "unknown",
+        "reference_evidence_ids": [],
+        "expected_abstention": true,
+        "semantic_test_claims": [],
+        "annotation_rationale": "Evidence is absent, conflicting, or too weak to establish a specific diagnosis; abstention is expected."
+      },
+      "case_type": "no_evidence"
+    },
+    {
+      "case_id": "insufficient-empty-02",
+      "category": "insufficient_evidence",
+      "input": {
+        "incident_id": "synthetic-insufficient-empty-02",
+        "incident_summary": "Alert text is the only available material.",
+        "observations": [],
+        "diagnostic_catalog": {
+          "web_health": "Checks synthetic web service readiness.",
+          "application_health": "Checks synthetic application service state.",
+          "database_health": "Checks synthetic database protocol availability.",
+          "network_health": "Checks synthetic routing and TCP reachability."
+        }
+      },
+      "gold": {
+        "expected_diagnostic_ids": [],
+        "classification": "unknown",
+        "reference_evidence_ids": [],
+        "expected_abstention": true,
+        "semantic_test_claims": [],
+        "annotation_rationale": "Evidence is absent, conflicting, or too weak to establish a specific diagnosis; abstention is expected."
+      },
+      "case_type": "no_evidence"
+    },
+    {
+      "case_id": "insufficient-ambiguous-01",
+      "category": "insufficient_evidence",
+      "input": {
+        "incident_id": "synthetic-insufficient-ambiguous-01",
+        "incident_summary": "Symptoms are intermittent and evidence is inconclusive.",
+        "observations": [],
+        "diagnostic_catalog": {
+          "web_health": "Checks synthetic web service readiness.",
+          "application_health": "Checks synthetic application service state.",
+          "database_health": "Checks synthetic database protocol availability.",
+          "network_health": "Checks synthetic routing and TCP reachability."
+        }
+      },
+      "gold": {
+        "expected_diagnostic_ids": [],
+        "classification": "unknown",
+        "reference_evidence_ids": [],
+        "expected_abstention": true,
+        "semantic_test_claims": [],
+        "annotation_rationale": "Evidence is absent, conflicting, or too weak to establish a specific diagnosis; abstention is expected."
+      },
+      "case_type": "ambiguous"
+    },
+    {
+      "case_id": "insufficient-conflict-01",
+      "category": "insufficient_evidence",
+      "input": {
+        "incident_id": "synthetic-insufficient-conflict-01",
+        "incident_summary": "Available observations directly conflict.",
+        "observations": [
+          {
+            "evidence_id": "syn:insufficient-conflict-01:1",
+            "diagnostic_id": "application_health",
+            "observed_result": {
+              "active": true
+            }
+          },
+          {
+            "evidence_id": "syn:insufficient-conflict-01:2",
+            "diagnostic_id": "application_health",
+            "observed_result": {
+              "active": false
+            }
+          }
+        ],
+        "diagnostic_catalog": {
+          "web_health": "Checks synthetic web service readiness.",
+          "application_health": "Checks synthetic application service state.",
+          "database_health": "Checks synthetic database protocol availability.",
+          "network_health": "Checks synthetic routing and TCP reachability."
+        }
+      },
+      "gold": {
+        "expected_diagnostic_ids": [],
+        "classification": "unknown",
+        "reference_evidence_ids": [
+          "syn:insufficient-conflict-01:1",
+          "syn:insufficient-conflict-01:2"
+        ],
+        "expected_abstention": true,
+        "semantic_test_claims": [],
+        "annotation_rationale": "Evidence is absent, conflicting, or too weak to establish a specific diagnosis; abstention is expected."
+      },
+      "case_type": "conflicting"
+    },
+    {
+      "case_id": "insufficient-causal-01",
+      "category": "insufficient_evidence",
+      "input": {
+        "incident_id": "synthetic-insufficient-causal-01",
+        "incident_summary": "A process failed, but the cause is not established.",
+        "observations": [
+          {
+            "evidence_id": "syn:insufficient-causal-01:1",
+            "diagnostic_id": "application_health",
+            "observed_result": {
+              "exit_code": 1
+            }
+          }
+        ],
+        "diagnostic_catalog": {
+          "web_health": "Checks synthetic web service readiness.",
+          "application_health": "Checks synthetic application service state.",
+          "database_health": "Checks synthetic database protocol availability.",
+          "network_health": "Checks synthetic routing and TCP reachability."
+        }
+      },
+      "gold": {
+        "expected_diagnostic_ids": [
+          "application_health"
+        ],
+        "classification": "unknown",
+        "reference_evidence_ids": [
+          "syn:insufficient-causal-01:1"
+        ],
+        "expected_abstention": true,
+        "semantic_test_claims": [
+          {
+            "claim_id": "false-cause",
+            "statement": "Exit code 1 proves a disk failure caused the service failure.",
+            "evidence_refs": [
+              "syn:insufficient-causal-01:1"
+            ],
+            "expected_adjudication": "insufficient"
+          }
+        ],
+        "annotation_rationale": "The recorded value is observable, but it does not establish the causal explanation in the claim."
+      },
+      "case_type": "observation_without_cause"
+    },
+    {
+      "case_id": "web-observation-only-01",
+      "category": "web",
+      "input": {
+        "incident_id": "synthetic-web-observation-only-01",
+        "incident_summary": "A 503 response is observed; its cause is unknown.",
+        "observations": [
+          {
+            "evidence_id": "syn:web-observation-only-01:1",
+            "diagnostic_id": "web_health",
+            "observed_result": {
+              "http_status": 503
+            }
+          }
+        ],
+        "diagnostic_catalog": {
+          "web_health": "Checks synthetic web service readiness.",
+          "application_health": "Checks synthetic application service state.",
+          "database_health": "Checks synthetic database protocol availability.",
+          "network_health": "Checks synthetic routing and TCP reachability."
+        }
+      },
+      "gold": {
+        "expected_diagnostic_ids": [
+          "web_health"
+        ],
+        "classification": "unknown",
+        "reference_evidence_ids": [
+          "syn:web-observation-only-01:1"
+        ],
+        "expected_abstention": true,
+        "semantic_test_claims": [
+          {
+            "claim_id": "false-cause",
+            "statement": "The 503 proves the configuration file is corrupt.",
+            "evidence_refs": [
+              "syn:web-observation-only-01:1"
+            ],
+            "expected_adjudication": "insufficient"
+          }
+        ],
+        "annotation_rationale": "The recorded value is observable, but it does not establish the causal explanation in the claim."
+      },
+      "case_type": "observation_without_cause"
+    },
+    {
+      "case_id": "db-observation-only-01",
+      "category": "database",
+      "input": {
+        "incident_id": "synthetic-db-observation-only-01",
+        "incident_summary": "A protocol failure is observed but its cause is unknown.",
+        "observations": [
+          {
+            "evidence_id": "syn:db-observation-only-01:1",
+            "diagnostic_id": "database_health",
+            "observed_result": {
+              "protocol_available": false
+            }
+          }
+        ],
+        "diagnostic_catalog": {
+          "web_health": "Checks synthetic web service readiness.",
+          "application_health": "Checks synthetic application service state.",
+          "database_health": "Checks synthetic database protocol availability.",
+          "network_health": "Checks synthetic routing and TCP reachability."
+        }
+      },
+      "gold": {
+        "expected_diagnostic_ids": [
+          "database_health"
+        ],
+        "classification": "unknown",
+        "reference_evidence_ids": [
+          "syn:db-observation-only-01:1"
+        ],
+        "expected_abstention": true,
+        "semantic_test_claims": [],
+        "annotation_rationale": "Evidence is absent, conflicting, or too weak to establish a specific diagnosis; abstention is expected."
+      },
+      "case_type": "observation_without_cause"
+    }
+  ]
+}

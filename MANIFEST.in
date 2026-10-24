@@ -9,6 +9,9 @@ recursive-include scenarios *.yml
 recursive-include tests *.py
 exclude tests/test_probe_approval_manifest.py
 exclude tests/test_live_*.py
+exclude tests/test_ai_local_orchestrator_v060.py
+recursive-include tests/fixtures/ai_acceptance_v060 *.json
+recursive-include tests/fixtures/assessment_m3 *.json *.yml
 include docs/architecture.md
 include docs/ai-investigation.md
 include docs/alert-incident-workflow-v0.3.0.md
@@ -45,3 +48,12 @@ include docs/staging-acceptance-v0.3.2.md
 include docs/full-workflow-acceptance-v0.6.0.md
 include docs/operator-demo-v0.6.0.md
 include docs/release-candidate-review-v0.6.0.md
+include docs/adr-evidence-aware-investigation-v0.7.0.md
+include docs/adr-independent-assessment-evaluation-v0.7.0.md
+include docs/assessment-m3-annotation-guidelines.md
+include docs/v0.7.0-m1-m2-completion.md
+include docs/v0.7.0-m3-completion.md
+include docs/v0.7.0-m3-evaluation-report.json
+include docs/v0.7.0-m3-evaluation-report.md
+include docs/v0.7.0-m4-completion.md
+include docs/v0.7.0-m5-release-acceptance.md

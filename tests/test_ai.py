@@ -106,7 +106,7 @@ def test_investigation_runs_only_catalog_readonly_diagnostics_and_stores_refs(
 
     provider = SequenceProvider([{"diagnostic_ids": ["web_health"]}, analysis])
     result = IncidentInvestigator(paths, config, config_dir, provider).investigate(
-        "Users report intermittent web errors."
+        "Users report intermittent web errors.", incident_id="incident-synthetic"
     )
 
     assert result["status"] == "succeeded"
@@ -123,6 +123,13 @@ def test_investigation_runs_only_catalog_readonly_diagnostics_and_stores_refs(
     assert model_payload["evidence_untrusted"][0]["ref"] == "R01"
     assert "execution_id" not in model_payload["evidence_untrusted"][0]
     assert result["report"]["recommendations_are_executable"] is False
+    assessment = result["assessment"]
+    assert assessment["schema_version"] == 1
+    assert assessment["incident_id"] == "incident-synthetic"
+    assert assessment["investigation_id"] == result["investigation_id"]
+    assert assessment["assessment_status"] == "partial"  # Legacy v0.6 reply has no classes.
+    assert assessment["observations"][0]["verification_status"] == "verified"
+    assert assessment["semantic_support_status"] == "unverified"
     selection_prompt = provider.calls[0][0]
     assert "no more than 2 diagnostics" in selection_prompt
     assert "smallest distinct set" in selection_prompt
@@ -134,6 +141,90 @@ def test_investigation_runs_only_catalog_readonly_diagnostics_and_stores_refs(
     assert rows[0]["result"]["incident_sha256"] == result["incident_sha256"]
     assert "intermittent" not in json.dumps(rows[0])
     assert SQLiteStore(paths.database).verify_audit_chain()[0]
+
+
+def test_structured_assessment_references_are_restored_and_persisted(
+    tmp_path: Path, key_material, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = write_config_tree(tmp_path)
+    fake_ssh(
+        tmp_path,
+        monkeypatch,
+        {"ok": True, "data": {"unit": "nginx.service", "active": True}, "error": None},
+    )
+    config, config_dir = make_config(tmp_path / "runbook.yml")
+    provider = SequenceProvider(
+        [
+            {"diagnostic_ids": ["web_health"]},
+            lambda calls: {
+                "inferences": [
+                    {"statement": "The registered check returned active.", "evidence_refs": ["R01"]}
+                ],
+                "hypotheses": [
+                    {
+                        "statement": "The service is currently active.",
+                        "confidence": 0.9,
+                        "evidence_refs": ["R01"],
+                    }
+                ],
+                "classifications": [
+                    {
+                        "category": "healthy",
+                        "confidence": 0.9,
+                        "supporting_evidence_refs": ["R01"],
+                        "status": "supported",
+                    }
+                ],
+                "unknowns": [],
+                "recommended_next_steps": ["An operator may review the service evidence."],
+                "overall_uncertainty": 0.1,
+                "assessment_status": "assessed",
+            },
+        ]
+    )
+    result = IncidentInvestigator(paths, config, config_dir, provider).investigate(
+        "Synthetic service status report."
+    )
+    assessment = result["assessment"]
+    canonical_ref = result["evidence"][0]["ref"]
+    assert assessment["inferences"][0]["evidence_refs"] == [canonical_ref]
+    assert assessment["classifications"][0]["supporting_evidence_refs"] == [canonical_ref]
+    assert assessment["classifications"][0]["status"] == "supported"
+    assert assessment["semantic_support_status"] == "unverified"
+    stored = SQLiteStore(paths.database).investigations()[0]["result"]["assessment"]
+    assert stored == assessment
+    assert SQLiteStore(paths.database).verify_audit_chain()[0]
+
+
+def test_existing_v060_investigation_json_opens_without_migration_or_rewrite(tmp_path: Path):
+    database = tmp_path / "state" / "v060.sqlite3"
+    store = SQLiteStore(database)
+    legacy_result = {
+        "incident_sha256": "a" * 64,
+        "status": "succeeded",
+        "selected_diagnostics": ["web_health"],
+        "tool_calls": 1,
+        "evidence": [],
+        "verified_evidence": [],
+        "report": {
+            "hypotheses": [],
+            "recommended_next_steps": [],
+            "recommendations_are_executable": False,
+        },
+        "model_metadata": {"provider": "mock", "model": "legacy", "model_calls": 2},
+    }
+    legacy_id = store.create_investigation(legacy_result)
+    assert store.verify_audit_chain()[0]
+    with sqlite3.connect(database) as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 4
+
+    reopened = SQLiteStore(database)
+    rows = reopened.investigations()
+    assert len(rows) == 1
+    assert rows[0]["investigation_id"] == legacy_id
+    assert rows[0]["result"] == legacy_result
+    assert "assessment" not in rows[0]["result"]
+    assert reopened.verify_audit_chain()[0]
 
 
 def test_prompt_injection_and_unknown_tool_selection_fail_closed(

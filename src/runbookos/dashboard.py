@@ -21,9 +21,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
+from .assessment import project_investigation_assessment
 from .errors import ConfigurationError, PolicyDenied
 from .incidents import IncidentStore
-from .store import SQLiteStore
+from .store import SQLiteStore, redact
 
 _PBKDF2_ITERATIONS = 310_000
 _SESSION_TTL = 3600
@@ -206,6 +207,114 @@ def _bounded_text(value: object, limit: int = 240) -> str:
     return text[: limit - 1] + "…"
 
 
+def _assessment_review_html(
+    state: DashboardState,
+    incident: dict[str, object],
+    *,
+    audit_valid: bool,
+) -> str:
+    """Render linked assessments from their validated, read-only projections."""
+    incident_id = str(incident["incident_id"])
+    incident_digest = hashlib.sha256(str(incident["summary"]).encode()).hexdigest()
+    links = incident.get("investigations", [])
+    if not isinstance(links, list) or not links:
+        return "<h2>Investigation assessments</h2><p>No linked investigations; assessment NOT AVAILABLE.</p>"
+
+    cards: list[str] = []
+    for index, link in enumerate(links):
+        if not isinstance(link, dict):
+            continue
+        investigation_id = str(link.get("investigation_id", ""))
+        record = state.incidents.store.investigation_detail(investigation_id)
+        if not audit_valid and record is not None:
+            record = record | {"result_integrity": "mismatch_or_missing_audit"}
+        projection = project_investigation_assessment(
+            record,
+            incident_id=incident_id,
+            incident_summary_sha256=incident_digest,
+            linked=True,
+        )
+        latest = index == len(links) - 1
+        header = (
+            f"<h3>Investigation {_e(projection.get('investigation_id') or investigation_id)}"
+            f"{' · latest linked' if latest else ''}</h3>"
+            f"<p>Status: <strong>{_e(projection['availability'])}</strong>; "
+            f"assessment: {_e(projection['assessment_status'])}; "
+            f"schema: {_e(projection.get('assessment_schema_version', 'unavailable'))}; "
+            f"classification catalog: {_e(projection.get('classification_catalog_version', 'unavailable'))}; "
+            f"investigation status/time: {_e(projection.get('investigation_status', 'unavailable'))} / "
+            f"{_e(projection.get('investigation_created_at', 'unavailable'))}</p>"
+        )
+        if projection["availability"] != "available":
+            cards.append(
+                f"<article>{header}<p>Assessment unavailable: "
+                f"{_e(projection.get('reason', 'unavailable'))}</p></article>"
+            )
+            continue
+
+        observations = []
+        for observation in projection["observations"]:
+            safe_result = json.dumps(
+                redact(observation["observed_result"]),
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            observations.append(
+                "<li>"
+                f"<strong>{_e(observation['ref'])}</strong> · "
+                f"{_e(observation['statement'])}<br>"
+                f"diagnostic {_e(observation['diagnostic_id'])} / action {_e(observation['source_action'])}; "
+                f"step {_e(observation['step_id'])}; execution {_e(observation['execution_id'])}<br>"
+                f"Observed at: {_e(observation.get('observed_at') or 'not recorded')}; "
+                f"execution: {_e(observation['execution_status'])}; "
+                f"assertion: {_e(observation['assertion_outcome'])}; "
+                f"verification: {_e(observation['verification_status'])}<br>"
+                f"Recorded result: <code>{_e(_bounded_text(safe_result, 1000))}</code></li>"
+            )
+        hypotheses = [
+            "<li>"
+            f"{_e(item['statement'])} · model-reported confidence {_e(item['confidence'])} "
+            f"(uncalibrated); evidence refs: {_e(', '.join(item['evidence_refs']) or 'none')}; "
+            "semantic support: unverified</li>"
+            for item in projection["hypotheses"]
+        ]
+        inferences = [
+            f"<li>{_e(item['statement'])} · evidence refs: "
+            f"{_e(', '.join(item['evidence_refs']))}; semantic support: unverified</li>"
+            for item in projection["inferences"]
+        ]
+        classifications = [
+            "<li>"
+            f"{_e(item['category'])}: {_e(item['status'])}; model-reported confidence "
+            f"{_e(item['confidence'])} (uncalibrated); supporting refs: "
+            f"{_e(', '.join(item['supporting_evidence_refs']) or 'none')}; semantic support: unverified"
+            "</li>"
+            for item in projection["classifications"]
+        ]
+        unknowns = [
+            f"<li>{_e(item['question'])}; missing evidence: "
+            f"{_e(', '.join(item['missing_evidence']) or 'not specified')}</li>"
+            for item in projection["unknowns"]
+        ]
+        next_steps = [
+            f"<li>{_e(_bounded_text(item, 500))}</li>"
+            for item in projection["recommended_next_steps"]
+        ]
+        content = (
+            f"<p>Uncertainty: {_e(projection['overall_uncertainty'])}; "
+            f"semantic support: {_e(projection['semantic_support_status'])}; "
+            f"evaluation: {_e(projection['evaluation_status'])}</p>"
+            f"<h4>Direct observations</h4><ul>{''.join(observations) or '<li>None recorded</li>'}</ul>"
+            f"<h4>AI inferences</h4><ul>{''.join(inferences) or '<li>None</li>'}</ul>"
+            f"<h4>AI hypotheses</h4><ul>{''.join(hypotheses) or '<li>None</li>'}</ul>"
+            f"<h4>Classification</h4><ul>{''.join(classifications) or '<li>Undetermined / NOT AVAILABLE</li>'}</ul>"
+            f"<h4>Unknowns</h4><ul>{''.join(unknowns) or '<li>None recorded</li>'}</ul>"
+            f"<h4>Advisory next steps (not executable)</h4><ul>{''.join(next_steps) or '<li>None</li>'}</ul>"
+        )
+        cards.append(f"<article>{header}{content}</article>")
+    return "<h2>Investigation assessments</h2>" + "".join(cards)
+
+
 def _page(title: str, body: str) -> bytes:
     return (
         "<!doctype html><html lang='en'><meta charset='utf-8'>"
@@ -361,6 +470,7 @@ def serve_dashboard(
                         404, "Incident not found", "<p>No incident with that identifier.</p>"
                     )
                     return
+                audit_valid, audit_count = state.incidents.store.verify_audit_chain()
                 links = "".join(
                     f"<li>{_e(alert['source'])} · {_e(alert['alert_id'])} · {_e(alert['event_timestamp'])}<br><span class='muted'>{_e(alert['correlation_reason'])}</span></li>"
                     for alert in detail["alerts"]
@@ -387,6 +497,7 @@ def serve_dashboard(
                     investigations.append(
                         f"<li>Investigation {_e(item['investigation_id'])}; executions: {_e(', '.join(item['execution_ids']) or 'none')}; evidence refs: {_e(', '.join(item['evidence_refs']) or 'none')} <span class='muted'>(verified references only; evidence payload omitted)</span></li>"
                     )
+                assessment_review = _assessment_review_html(state, detail, audit_valid=audit_valid)
                 remediation_rows = []
                 for item in detail["remediation_plans"]:
                     executions = (
@@ -427,12 +538,16 @@ def serve_dashboard(
                         f"Executions: {_e(executions)} {warning}</li>"
                     )
                 controls = _controls(detail, session.csrf)
-                valid, count = state.incidents.store.verify_audit_chain()
-                audit = f"VALID · {count} events" if valid else f"INVALID · verified prefix {count}"
+                audit = (
+                    f"VALID · {audit_count} events"
+                    if audit_valid
+                    else f"INVALID · verified prefix {audit_count}"
+                )
                 body = (
                     f"<article><p><strong>{_e(detail['severity'].upper())}</strong> · {_e(detail['status'])}</p><p>{_e(detail['summary'])}</p>"
                     f"<dl><dt>Target / service</dt><dd>{_e(detail['target_alias'])} / {_e(detail['service'])}</dd><dt>Category</dt><dd>{_e(detail['category'])}</dd><dt>Created / updated</dt><dd>{_e(detail['created_at'])} / {_e(detail['updated_at'])}</dd><dt>Audit chain</dt><dd>{_e(audit)}</dd></dl></article>"
                     f"<h2>Alert correlation</h2><ul>{links}</ul><h2>Linked investigations</h2><ul>{''.join(investigations) or '<li>None</li>'}</ul>"
+                    f"{assessment_review}"
                     f"<h2>Remediation review (read-only)</h2><ul>{''.join(remediation_rows) or '<li>No remediation plans associated.</li>'}</ul>"
                     f"<h2>Incident timeline</h2><table><tr><th>Time</th><th>Event</th><th>Actor</th><th>Reason</th><th>Evidence status</th><th>Status transition</th></tr>{events}</table>{controls}"
                 )

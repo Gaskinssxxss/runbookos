@@ -1,0 +1,21 @@
+classification_catalog_version: 2
+assessment_schema_version: 1
+classifications:
+  healthy: Targeted checks support expected service behavior.
+  service_failure: The local service itself is unavailable or failed.
+  connectivity_failure: A protocol or transport connection to a dependency failed.
+  network_failure: Network path, route, or local network capability failed.
+  dependency_failure: A dependency is degraded from the application perspective.
+  resource_pressure: Evidence indicates constrained compute or storage resources.
+  unknown: Evidence is absent, conflicting, or insufficient to determine state.
+diagnostic_catalog_version: 1
+diagnostic_ids:
+  - web_health
+  - application_health
+  - database_health
+  - network_health
+diagnostic_descriptions:
+  web_health: Checks synthetic web service readiness.
+  application_health: Checks synthetic application service state.
+  database_health: Checks synthetic database protocol availability.
+  network_health: Checks synthetic routing and TCP reachability.

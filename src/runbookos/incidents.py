@@ -919,7 +919,8 @@ class IncidentStore:
                 (incident_id,),
             ).fetchall()
             investigations = db.execute(
-                "SELECT * FROM incident_investigations WHERE incident_id=? ORDER BY linked_at",
+                "SELECT * FROM incident_investigations WHERE incident_id=? "
+                "ORDER BY linked_at,investigation_id",
                 (incident_id,),
             ).fetchall()
         return dict(row) | {

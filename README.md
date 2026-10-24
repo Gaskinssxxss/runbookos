@@ -1,6 +1,6 @@
-# RunbookOS v0.6.0 — Incident-to-Remediation Workflow
+# RunbookOS v0.7.0 — Evidence-Aware Incident Review
 
-Development branch: `feat/v0.6.0-incident-remediation-workflow`, based on the v0.5.0 human-controlled remediation baseline. Incident-linked remediation review reuses the existing plans, one-time approvals, policy, execution history, and audit storage.
+Development branch: `feat/v0.7.0-evidence-aware-assessment`, based on the v0.6.0 incident-to-remediation workflow. v0.7.0 adds structured evidence-aware assessment, independent offline evaluation, and read-only CLI/dashboard review while retaining existing human approval and execution boundaries.
 
 RunbookOS is a lightweight Python CLI for validating, planning, running, and auditing Linux operational runbooks, with optional AI-assisted incident investigation and human-controlled alert-to-incident workflow. It uses versioned YAML/JSON, Pydantic, Typer, SQLite, OpenSSH, and a replaceable provider interface with one OpenAI-compatible HTTP implementation. The optional webhook is disabled unless started manually and binds only to loopback. There is no autonomous remediation loop.
 
@@ -56,6 +56,12 @@ Execution results carry `VERIFIED_SUCCESS`, `VERIFIED_FAILURE`, `UNKNOWN`, or `N
 An operator can associate an existing, current, single-target remediation plan with an incident using `runbookos incidents associate-plan INCIDENT_ID PLAN_ID`. Association records the immutable plan hash, target, registered action, and OS-derived actor; it is not approval and cannot execute the plan. `runbookos incidents remediation-review INCIDENT_ID` presents incident context, linked investigations and evidence references, a revalidated deterministic plan preview, approval state, and previous outcomes. `UNKNOWN` outcomes are called out for independent investigation. Execution remains an explicit CLI action using the existing v0.5.0 approval and confirmation flow. The dashboard only displays associated plan, approval, and outcome context; it has no approval or execution control. Successful remediation never changes incident lifecycle state automatically.
 
 The incident-plan association uses an additive SQLite migration. Historical plans, executions, audit events, benchmark data, and the v0.5.0 disposable-target manifest are retained. That manifest remains `NOT_AUTHORIZED`; this release is offline-validated and does not claim live remediation acceptance.
+
+## v0.7.0 evidence-aware assessment and review
+
+Investigations can persist a versioned `StructuredAssessment` separating direct diagnostic observations from model inferences, hypotheses, classifications, unknowns, and advisory next steps. Deterministic validation checks schema, taxonomy, evidence references, claim constraints, and assertion/verification provenance. Citations establish reference integrity only; semantic support remains unverified unless independently adjudicated. Model-reported confidence is uncalibrated.
+
+The M3 evaluator is a separate offline component with a 24-case synthetic held-out dataset. Evaluator reference predictions test metric behavior but are not Qwen outputs. The checked-in M3 evaluation report contains no model predictions; Qwen performance on the held-out cases is **NOT MEASURED**. `runbookos incidents show ID` adds a read-only assessment projection, and the authenticated loopback dashboard displays linked investigations separately. Legacy investigations remain readable with assessment `NOT AVAILABLE`. Neither view starts diagnostics, AI, SSH, approval, or remediation. See the [M1/M2 completion](docs/v0.7.0-m1-m2-completion.md), [M3 evaluation report](docs/v0.7.0-m3-evaluation-report.md), and [M4 completion](docs/v0.7.0-m4-completion.md).
 
 ## Install
 
