@@ -216,6 +216,102 @@ def test_incident_remediation_cli_association_and_review_are_human_controlled(
     assert json.loads(stale.output)["remediation_plans"][0]["preview_status"] == "stale_or_invalid"
 
 
+def test_propose_remediation_cli_reads_yaml_candidate_mapping(tmp_path: Path, monkeypatch) -> None:
+    from runbookos import cli as cli_module
+
+    paths = write_config_tree(tmp_path, remediation=True)
+    incident_store = IncidentStore(SQLiteStore(paths.database))
+    alert = parse_alert(
+        json.dumps(
+            {
+                "alert_id": "proposal-cli-alert",
+                "source": "test-monitor",
+                "event_timestamp": datetime.now(UTC).isoformat(),
+                "severity": "error",
+                "target_alias": "test-web",
+                "service": "nginx",
+                "category": "service",
+                "summary": "Synthetic proposal CLI test incident",
+                "fingerprint": "proposal-cli-fingerprint",
+                "metadata": {},
+            }
+        ).encode()
+    )
+    incident_id = incident_store.ingest(alert)["incident_id"]
+    incident_store.transition(incident_id, "ACKNOWLEDGED", "test-operator", "test acknowledgement")
+    incident_store.mark_investigating(incident_id, "test-operator")
+
+    ai_config = tmp_path / "investigation.yml"
+    ai_config.write_text(
+        "schema_version: 1\n"
+        "provider:\n"
+        "  type: openai_compatible\n"
+        "  base_url: http://127.0.0.1:18080/v1\n"
+        "  model: test-model\n"
+        "  timeout_seconds: 10\n"
+        "  max_tokens: 700\n"
+        "catalog:\n"
+        "  - id: test-diagnostic\n"
+        "    runbook: test.yml\n"
+        "    description: Test diagnostic catalog entry.\n"
+    )
+    candidates = tmp_path / "candidates.yml"
+    candidates.write_text(
+        "schema_version: 1\n"
+        "candidates:\n"
+        "  - action_id: systemd.restart\n"
+        "    target_ref: fixture-web\n"
+        "    target_name: test-web\n"
+        "    arguments:\n"
+        "      unit: nginx.service\n"
+        "    required_evidence_actions: []\n"
+        "    compatible_categories: [service_failure]\n"
+    )
+    captured = {}
+
+    class FakeInvestigator:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def propose_remediation(self, incident, investigation, action_candidates):
+            captured["incident"] = incident
+            captured["investigation"] = investigation
+            captured["candidate"] = action_candidates[0].model_dump(mode="json")
+            return {"status": "accepted", "proposal": {"test": True}}
+
+    monkeypatch.setattr(cli_module, "IncidentInvestigator", FakeInvestigator)
+    monkeypatch.setattr(cli_module, "build_provider", lambda _config: object())
+    root_args = [
+        "--inventory",
+        str(paths.inventory),
+        "--policy",
+        str(paths.policy),
+        "--ssh-profiles",
+        str(paths.ssh_profiles),
+        "--db",
+        str(paths.database),
+    ]
+    result = CliRunner().invoke(
+        app,
+        root_args
+        + [
+            "incidents",
+            "propose-remediation",
+            incident_id,
+            "--investigation",
+            "investigation-test",
+            "--ai-config",
+            str(ai_config),
+            "--candidates",
+            str(candidates),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == {"status": "accepted", "proposal": {"test": True}}
+    assert captured["candidate"]["action_id"] == "systemd.restart"
+    assert captured["candidate"]["target_name"] == "test-web"
+
+
 def test_incident_remediation_cli_rejects_cross_target_association(tmp_path: Path) -> None:
     paths = write_config_tree(tmp_path, remediation=True)
     engine = RunbookEngine(paths)

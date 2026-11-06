@@ -241,6 +241,8 @@ def trace_investigation(trace: InvestigationTrace) -> Iterator[None]:
     """Temporarily instrument real validation/planning/persistence boundaries."""
     original_parse = ai._parse_selection
     original_decode = ai._decode_model_json
+    original_decode_minimal = ai._decode_minimal_assessment_reply
+    original_convert_minimal = ai.convert_minimal_reply
     original_restore = ai._restore_evidence_refs
     original_restore_assessment = ai._restore_assessment_refs
     original_sanitize = ai._sanitize_report
@@ -297,6 +299,27 @@ def trace_investigation(trace: InvestigationTrace) -> Iterator[None]:
         trace.evidence_validation = "citation_references_validated"
         return result
 
+    def decoded_minimal(content: str) -> Any:
+        trace.stage = "assessment_schema_validation"
+        try:
+            return original_decode_minimal(content)
+        except Exception as exc:
+            trace.exception_type = type(exc).__name__
+            trace.reason_category = _reason_category(exc)
+            raise
+
+    def converted_minimal(reply: Any, observations: Any, aliases: Any, **kwargs: Any) -> Any:
+        trace.stage = "evidence_reference_validation"
+        try:
+            result = original_convert_minimal(reply, observations, aliases, **kwargs)
+        except Exception as exc:
+            trace.evidence_validation = "rejected"
+            trace.exception_type = type(exc).__name__
+            trace.reason_category = _reason_category(exc)
+            raise
+        trace.evidence_validation = "citation_references_validated"
+        return result
+
     def sanitized(analysis: Any, valid_refs: Any) -> Any:
         trace.stage = "evidence_claim_validation"
         try:
@@ -333,7 +356,19 @@ def trace_investigation(trace: InvestigationTrace) -> Iterator[None]:
         trace.stage = "investigation_persistence"
         value = original_create(instance, result, **kwargs)
         trace.investigation_persisted = True
-        trace.stage = "completed"
+        failure = result.get("assessment_failure")
+        if isinstance(failure, dict):
+            trace.exception_type = str(failure.get("error_type", "RunbookOSError"))
+            trace.reason_category = str(
+                failure.get("reason_category", failure.get("category", "other_error"))
+            )
+            trace.stage = (
+                "catalog_selection_validation"
+                if failure.get("stage") == "selection"
+                else "assessment_failure_persisted"
+            )
+        else:
+            trace.stage = "completed"
         return value
 
     def executed(instance: RunbookEngine, *args: Any, **kwargs: Any) -> Any:
@@ -343,6 +378,8 @@ def trace_investigation(trace: InvestigationTrace) -> Iterator[None]:
     with (
         patch.object(ai, "_parse_selection", parsed),
         patch.object(ai, "_decode_model_json", decoded),
+        patch.object(ai, "_decode_minimal_assessment_reply", decoded_minimal),
+        patch.object(ai, "convert_minimal_reply", converted_minimal),
         patch.object(ai, "_restore_evidence_refs", restored),
         patch.object(ai, "_restore_assessment_refs", restored_assessment),
         patch.object(ai, "_sanitize_report", sanitized),

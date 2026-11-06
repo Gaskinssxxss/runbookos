@@ -273,8 +273,8 @@ def _assessment_review_html(
             )
         hypotheses = [
             "<li>"
-            f"{_e(item['statement'])} · model-reported confidence {_e(item['confidence'])} "
-            f"(uncalibrated); evidence refs: {_e(', '.join(item['evidence_refs']) or 'none')}; "
+            f"{_e(item['statement'])} · {_e(projection['confidence_label'])}: "
+            f"{_e(item['confidence'])}; evidence refs: {_e(', '.join(item['evidence_refs']) or 'none')}; "
             "semantic support: unverified</li>"
             for item in projection["hypotheses"]
         ]
@@ -285,8 +285,8 @@ def _assessment_review_html(
         ]
         classifications = [
             "<li>"
-            f"{_e(item['category'])}: {_e(item['status'])}; model-reported confidence "
-            f"{_e(item['confidence'])} (uncalibrated); supporting refs: "
+            f"{_e(item['category'])}: {_e(item['status'])}; {_e(projection['confidence_label'])}: "
+            f"{_e(item['confidence'])}; supporting refs: "
             f"{_e(', '.join(item['supporting_evidence_refs']) or 'none')}; semantic support: unverified"
             "</li>"
             for item in projection["classifications"]
@@ -301,6 +301,7 @@ def _assessment_review_html(
             for item in projection["recommended_next_steps"]
         ]
         content = (
+            f"<p>Evidence provenance: {_e(projection['evidence_origin'])}</p>"
             f"<p>Uncertainty: {_e(projection['overall_uncertainty'])}; "
             f"semantic support: {_e(projection['semantic_support_status'])}; "
             f"evaluation: {_e(projection['evaluation_status'])}</p>"

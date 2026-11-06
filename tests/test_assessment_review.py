@@ -204,7 +204,7 @@ def test_incident_show_and_authenticated_dashboard_share_read_only_assessment(tm
         assert "assessment: abstained" in dashboard
         assert "undetermined" in dashboard
         assert "NOT MEASURED" in dashboard
-        assert "model-reported confidence 0.42 (uncalibrated)" in dashboard
+        assert "origin unavailable: 0.42" in dashboard
         assert "semantic support: unverified" in dashboard
         assert "&lt;img src=x onerror=alert(1)&gt;" in dashboard
         assert "<img src=x onerror=alert(1)>" not in dashboard

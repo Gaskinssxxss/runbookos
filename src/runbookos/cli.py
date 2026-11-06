@@ -11,14 +11,16 @@ import typer
 import yaml
 
 from . import __version__
+from .actions import validate_action
 from .ai import (
     IncidentInvestigator,
+    InvestigationFailure,
     build_provider,
     load_investigation_config,
 )
 from .assessment import project_investigation_assessment
 from .blind_review import export_blind_review, reviewer_agreement
-from .config import load_inventory, load_runbook, load_ssh_profiles
+from .config import load_inventory, load_runbook, load_ssh_profiles, read_yaml
 from .dashboard import create_auth_file, serve_dashboard
 from .engine import Paths, RunbookEngine, validate_runbook
 from .errors import RunbookOSError
@@ -43,6 +45,8 @@ from .evaluation_v2 import (
     summarize_v2,
 )
 from .incidents import IncidentStore, parse_alert, validate_target
+from .models import Policy
+from .remediation_proposal import RegisteredActionCandidate
 from .store import SQLiteStore
 from .tunnel import load_tunnel_config, run_tunnel
 from .webhook import serve_from_environment
@@ -614,19 +618,33 @@ def incident_investigate(
     try:
         manager = IncidentStore(SQLiteStore(ctx.obj.database))
         incident = manager.show(incident_id)
-        if incident["status"] != "ACKNOWLEDGED":
-            raise RunbookOSError("incident must be ACKNOWLEDGED before investigation")
-        manager.mark_investigating(incident_id, getpass.getuser())
+        if incident["status"] not in {"ACKNOWLEDGED", "INVESTIGATING"}:
+            raise RunbookOSError(
+                "incident must be ACKNOWLEDGED or INVESTIGATING before investigation"
+            )
+        if incident["status"] == "ACKNOWLEDGED":
+            manager.mark_investigating(incident_id, getpass.getuser())
         if ai_config:
             config, config_dir = load_investigation_config(_path(ai_config))
             alert_summary = incident["summary"]
-            result = IncidentInvestigator(
+            investigator = IncidentInvestigator(
                 ctx.obj,
                 config,
                 config_dir,
                 build_provider(config.provider),
                 allowed_targets={incident["target_alias"]},
-            ).investigate(alert_summary, incident_id=incident_id)
+            )
+            try:
+                result = investigator.investigate(alert_summary, incident_id=incident_id)
+            except InvestigationFailure as exc:
+                evidence = exc.verified_evidence
+                manager.link_investigation(
+                    incident_id,
+                    exc.investigation_id,
+                    sorted({item["execution_id"] for item in evidence}),
+                    sorted({item["ref"] for item in evidence}),
+                )
+                raise
             evidence = result.get("verified_evidence", [])
             manager.link_investigation(
                 incident_id,
@@ -976,3 +994,63 @@ def evaluation_review_agreement(
     except Exception as exc:
         _fail(exc)
     _json(result)
+
+
+@incidents_app.command("propose-remediation")
+def incident_propose_remediation(
+    ctx: typer.Context,
+    incident_id: str,
+    investigation_id: str = typer.Option(..., "--investigation"),
+    ai_config: Path = typer.Option(..., "--ai-config", exists=True, dir_okay=False),
+    candidates_file: Path = typer.Option(..., "--candidates", exists=True, dir_okay=False),
+) -> None:
+    """Ask AI for an advisory proposal limited to registered, policy-eligible candidates."""
+    try:
+        manager = IncidentStore(SQLiteStore(ctx.obj.database))
+        incident = manager.show(incident_id)
+        if incident["status"] != "INVESTIGATING":
+            raise RunbookOSError("incident must be INVESTIGATING before proposal generation")
+        config, config_dir = load_investigation_config(_path(ai_config))
+        raw, _ = read_yaml(_path(candidates_file))
+        if not isinstance(raw, dict) or set(raw) != {"schema_version", "candidates"}:
+            raise RunbookOSError("remediation candidate catalog has an invalid shape")
+        if raw["schema_version"] != 1 or not isinstance(raw["candidates"], list):
+            raise RunbookOSError("unsupported remediation candidate catalog version")
+        inventory, _ = load_inventory(ctx.obj.inventory)
+        policy_raw, _ = read_yaml(ctx.obj.policy)
+        policy = Policy.model_validate(policy_raw)
+        target = incident["target_alias"]
+        if target not in inventory.hosts or target not in policy.hosts:
+            raise RunbookOSError("incident target is not present in inventory and policy")
+        host_policy = policy.hosts[target]
+        candidates = [RegisteredActionCandidate.model_validate(item) for item in raw["candidates"]]
+        if not candidates:
+            raise RunbookOSError("remediation candidate catalog is empty")
+        for candidate in candidates:
+            if candidate.target_name != target:
+                raise RunbookOSError("candidate target does not exactly match incident target")
+            action = validate_action(candidate.action_id, candidate.arguments)
+            if action.read_only:
+                raise RunbookOSError("candidate action must be a registered remediation")
+            if candidate.action_id not in host_policy.remediation_actions:
+                raise RunbookOSError("candidate action is not allowed by target policy")
+            if (
+                "unit" in candidate.arguments
+                and candidate.arguments["unit"] not in host_policy.allowed_units
+            ):
+                raise RunbookOSError("candidate unit is not allowed by target policy")
+            if (
+                "endpoint_id" in candidate.arguments
+                and candidate.arguments["endpoint_id"] not in host_policy.allowed_probe_targets
+            ):
+                raise RunbookOSError("candidate endpoint is not allowed by target policy")
+        investigator = IncidentInvestigator(
+            ctx.obj,
+            config,
+            config_dir,
+            build_provider(config.provider),
+            allowed_targets={target},
+        )
+        _json(investigator.propose_remediation(incident_id, investigation_id, candidates))
+    except Exception as exc:
+        _fail(exc)

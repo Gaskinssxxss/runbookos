@@ -19,18 +19,18 @@ The source managed host's inventory defines endpoint IDs and exact private IPv4 
 # inventory fragment (fictional TEST-NET-like lab values; not enabled)
 hosts:
   example-app:
-    address: 10.250.1.20
+    address: 192.0.2.10
     user: runbookos
     role: application-server
     ssh_profile: homelab
     probe_targets:
       postgres_listener:
         protocol: postgresql
-        address: 10.250.2.10
+        address: 192.0.2.20
         port: 5432
       application_readiness:
         protocol: https
-        address: 10.250.1.20
+        address: 192.0.2.10
         port: 8443
         path: /health/ready
 ```

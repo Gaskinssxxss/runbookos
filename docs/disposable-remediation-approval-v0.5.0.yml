@@ -1,43 +1,145 @@
-schema_version: 1
+schema_version: 2
 status: NOT_AUTHORIZED
-purpose: Future operator review for isolated remediation acceptance only.
+purpose: >-
+  Approval request template for one future disposable-target remediation acceptance.
+  This file is incomplete until every required fact is supplied and approved.
+
+review_findings:
+  local_candidate:
+    alias: portfolio-demo-01
+    observed_state: shut_off
+    persistent_domain: true
+    title_or_description: absent
+    os_metadata: Ubuntu 24.04
+    attached_disk: present
+    disk_contents_reviewed: false
+    operator_disposable_designation: NOT_PROVIDED
+    data_preservation_requirements: UNKNOWN
+    eligible_for_acceptance: false
+    reason: >-
+      A powered-off persistent VM is not disposable by implication. Existing local
+      metadata does not establish its purpose, data-retention requirements, or
+      authorization for destructive testing. Do not start or access this candidate.
+
 target:
-  alias: disposable-test-01
-  address: 192.0.2.50
+  alias: null # Required: operator-designated disposable inventory alias.
+  address: null # Required: exact target address; never use TEST-NET placeholders.
+  domain_uuid: null # Required if a local libvirt VM is selected.
   environment: disposable-only
+  purpose: null # Required: operator-confirmed purpose and owner.
+  disposable_designation: null # Required: explicit operator statement and date.
+  data_preservation_review: null # Required: preserve/delete decision and approval.
   service: runbookos-sample.service
+  state_before_test: null # Required: observed preflight evidence from authorized access.
+
 source:
-  executor: operator-controlled RunbookOS CLI
-  identity: dedicated non-sudo account, not provisioned by this repository
+  executor: RunbookOS CLI using the existing strict OpenSSH adapter
+  host: null # Required: exact controller hostname and environment.
+  os_account: null # Required: existing non-sudo account; no account provisioning here.
+  ssh_identity_fingerprint: null # Required: existing dedicated public-key fingerprint.
+  pinned_host_key_fingerprint: null # Required: verified through a trusted channel.
+  actor: null # Required: approving operator identity, recorded by the engine.
+
 action:
   id: systemd.restart
+  implementation: system-level /usr/bin/systemctl restart <unit>
   parameters:
     unit: runbookos-sample.service
   runbook: examples/runbooks/disposable-systemd-restart.yml
-network:
-  changes_authorized: false
-  ssh_port: 22
-privileges:
+  plan_id: null # Must be created only after authorization and configuration review.
+  plan_hash: null # Operator must compare the exact preview before approval.
+  implementation_fingerprint: null # Must match the reviewed plan.
+  approval_id: null # One-time approval is issued only after this request is approved.
+  approval_expiry: null # Required: exact expiry from policy TTL.
+
+authorization:
+  required_existing_capability: >-
+    The systemd system manager must already authorize this non-sudo account to
+    restart exactly the named system unit, through pre-existing narrowly scoped
+    authorization. The current registered action does not use systemctl --user.
+  evidence_of_existing_capability: null # Required; no sudo, Polkit, or ownership changes.
   sudo_authorized: false
   additional_privileges_authorized: false
-approval:
-  required_before_any_live_acceptance: true
-  requires_exact_target_identity_and_host_key: true
-  requires_operator_review_of_preview_and_policy: true
-  requires_time_bounded_one_time_plan_approval: true
-  requires_explicit_run_confirmation: true
-limits:
+  policy_target_allow: null # Required: exact target/action/unit decision from plan.
+  approval_status: NOT_AUTHORIZED
+  explicit_run_confirmation_required: true
+
+network:
+  source_ip: null # Required: known source address and path.
+  destination_ip: null # Must equal target.address.
+  protocol: TCP
+  port: 22
+  existing_reachability_evidence: null # Required; no firewall or route changes allowed.
+  network_changes_authorized: false
+
+preflight:
+  - Verify exact target identity and pinned SSH host key.
+  - Verify the named unit exists and is active using registered read-only diagnostics.
+  - Verify the plan is policy-allowed for this exact target and unit.
+  - Verify an unused, unexpired approval is bound to the exact plan hash.
+  - Stop if the non-sudo account lacks the already-existing systemd authorization.
+postflight:
+  - Verify the same named unit is active using the registered read-only action.
+  - Verify RunbookOS recorded the action result and postflight evidence.
+  - Verify audit hash-chain integrity and expected execution count.
+
+impact_and_recovery:
+  expected_impact: >-
+    Restarting the system unit may briefly interrupt the service and active
+    requests or connections.
+  rollback: >-
+    Restart is not reversible. Do not retry or roll back an unknown result.
+    Recovery requires independent operator inspection and a separately planned,
+    policy-checked, approved action.
+  recovery_owner: null # Required: operator responsible for manual recovery.
+  recovery_procedure: null # Required: verified procedure and service-specific checks.
+
+execution_window:
+  start: null # Required: approved UTC start.
+  end: null # Required: approved UTC end.
+  operator: null
+
+state_and_evidence:
+  database: null # Required: new isolated acceptance SQLite path; never operational state.
+  expected_writes:
+    - plan and plan-created audit event
+    - approval and approval-consumed audit event
+    - execution, preflight/mutation/postflight step evidence, and outcome audit events
+  preserve_evidence_and_audit: true
   maximum_action_timeout_seconds: 30
   maximum_mutating_actions_per_plan: 1
   automatic_retry: false
   automatic_rollback: false
   ai_or_alert_initiation: false
+
+approval:
+  operator_name: null
+  approved_at_utc: null
+  approved_target_identity: null
+  approved_plan_hash: null
+  approved_time_window: null
+  scope: >-
+    Approval, if later completed, applies only to the exact disposable target,
+    source identity, unit, plan hash, and time window listed above. It does not
+    authorize VM provisioning/start, privilege changes, network changes, or any
+    other target or action.
+
+stop_conditions:
+  - Any target, host-key, plan-hash, policy, or approval mismatch.
+  - Missing evidence that the account already has exact system-unit authorization.
+  - Failed preflight, timeout, uncertain SSH result, or missing postflight evidence.
+  - Any request for sudo, Polkit, ownership, SSH, firewall, route, or service changes.
+
 cleanup:
   vm_creation_or_start_authorized: false
   host_hypervisor_changes_authorized: false
   service_changes_authorized: false
-  preserve_evidence_and_audit: true
+  firewall_or_routing_changes_authorized: false
+  ssh_or_account_changes_authorized: false
+  preserve_acceptance_evidence: true
+
 notes:
-  - This manifest is a review template, not an authorization to provision or execute.
-  - The documentation-only target address is TEST-NET-1 and must never be used as a live endpoint.
-  - A systemd restart may require privileges unavailable to a non-sudo account; do not expand privileges to make the test pass.
+  - This is an incomplete request template, not authorization to plan or execute.
+  - The observed portfolio-demo-01 candidate is not designated disposable and is not approved.
+  - No VM disk contents were inspected; their preservation status remains unknown.
+  - Never grant new privilege solely to make this acceptance pass.

@@ -166,6 +166,14 @@ def test_stale_source_fingerprint_blocks_cli_association(tmp_path: Path):
     assert incidents.remediation_context(incident_id) == []
 
 
+def test_remediation_preview_reports_target_scoped_argument_validation(tmp_path: Path):
+    _, engine, plan, _, _ = _setup(tmp_path)
+    preview = engine.remediation_preview(plan.plan_id)
+    assert preview["policy"]["action_allowed_for_target"] is True
+    assert preview["policy"]["unit_allowed_for_target"] is True
+    assert preview["policy"]["arguments_scope_allowed"] is True
+
+
 class _UnknownExecutor:
     def __init__(self):
         self.calls = 0

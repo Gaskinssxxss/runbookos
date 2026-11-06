@@ -68,6 +68,23 @@ def test_tunnel_rejects_targets_outside_the_pinned_inference_endpoint(tmp_path: 
         )
 
 
+def test_tunnel_can_forward_to_approved_18080_loopback_endpoint(tmp_path: Path):
+    identity, known_hosts = _files(tmp_path)
+    config = TunnelConfig(
+        schema_version=1,
+        host="host.example.test",
+        user="runbookos-tunnel",
+        identity_file=identity,
+        known_hosts_file=known_hosts,
+        local_port=8080,
+        remote_port=18080,
+    )
+
+    command = build_ssh_command(config)
+
+    assert command[command.index("-L") + 1] == "127.0.0.1:8080:127.0.0.1:18080"
+
+
 def test_tunnel_rejects_ssh_option_injection_and_non_private_identity(tmp_path: Path):
     identity, known_hosts = _files(tmp_path, identity_mode=0o644)
     with pytest.raises(ValidationError, match="simple local SSH account"):

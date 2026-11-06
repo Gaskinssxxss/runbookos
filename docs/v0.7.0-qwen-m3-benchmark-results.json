@@ -1,0 +1,137 @@
+{
+  "report_schema_version": 1,
+  "runbookos_version": "0.7.0",
+  "source_head": "d68197c3ac37336e1b9bfa8d66059e5eb8ecd001",
+  "source_state": "working tree included pre-existing local benchmark files and modifications to assessment_evaluation.py and its tests; no production source was changed for this live run",
+  "source_fingerprints_sha256": {
+    "src/runbookos/assessment_evaluation.py": "6c9b78beb23a8d821ea62f02deef66cf68766e57aadc0d0f82d748990cb48c91",
+    "src/runbookos/assessment.py": "241ffd4f45ddd174e9fba5dedb83fff7aa1a45460eb857f31516f0c09ffed02a",
+    "scripts/qwen-m3-benchmark-v070.py": "ad197a21a155fd77ef9d00f870fa5d24ff490b935d332193f9eb5e953740ee39",
+    "scripts/ai-local-acceptance-v060.py": "a19e74905459aca31a337c221348a9bfd9bcb9ffce32590f471a0cf273096f7c",
+    "tests/ai_m3_benchmark_v070.py": "5c1286260d4af700340c8b6cb0532adace53771de9bf2e19834507b8b7dac501"
+  },
+  "acceptance_status": "PARTIAL",
+  "dataset": {
+    "id": "m3-1.0",
+    "cases": 24,
+    "gold_labels_sent_to_model": false,
+    "observations": "pre-provided synthetic fixtures; no real diagnostic execution"
+  },
+  "model": {
+    "identity": "Qwen 3.5 9B Q5_K_M",
+    "sha256": "dc2a39aef291f91a9116ad214058da0d86eb648743a124bd8c333787c4b9c91c"
+  },
+  "runtime": {
+    "identity": "llama.cpp llama-server",
+    "sha256": "98a8581124ccf8ba775a89e1899c895b2d4a2053b9830f8b044fe69b928c02ac",
+    "listener": "127.0.0.1:18080",
+    "server_exit_code": 0,
+    "acceptance_process_remaining": false,
+    "listener_released": true
+  },
+  "requests": {
+    "planned_maximum": 48,
+    "actual": 30,
+    "serial": true,
+    "retries": 0,
+    "per_request_timeout_seconds": 120,
+    "latency_seconds": {
+      "count": 30,
+      "minimum": 13.957,
+      "mean": 26.31,
+      "maximum": 63.387
+    }
+  },
+  "resource_monitor": {
+    "status": "passed",
+    "sample_count": 1581,
+    "poll_interval_seconds": 0.5,
+    "nominal_detection_delay_seconds": 0.5,
+    "prelaunch_memavailable_gib": 19.75,
+    "minimum_memavailable_gib_during_run": 16.04,
+    "stop_threshold_memavailable_gib": 6.0,
+    "peak_main_server_rss_gib": 9.61,
+    "stop_threshold_main_server_rss_gib": 10.0,
+    "measurement_boundary": "main llama-server PID only; descendant processes are not aggregated; no kernel memory limit is enforced"
+  },
+  "case_outcomes": [
+    {"case_id":"web-normal-01","status":"invalid_json","provider_requests":1,"selected_diagnostic_ids":[],"assessment":"not_requested","latency_seconds":[19.248]},
+    {"case_id":"web-failure-01","status":"invalid_json","provider_requests":1,"selected_diagnostic_ids":[],"assessment":"not_requested","latency_seconds":[19.805]},
+    {"case_id":"web-failure-02","status":"invalid_json","provider_requests":1,"selected_diagnostic_ids":[],"assessment":"not_requested","latency_seconds":[19.135]},
+    {"case_id":"web-conflict-01","status":"invalid_json","provider_requests":1,"selected_diagnostic_ids":[],"assessment":"not_requested","latency_seconds":[27.266]},
+    {"case_id":"web-ambiguous-01","status":"invalid_json","provider_requests":1,"selected_diagnostic_ids":[],"assessment":"not_requested","latency_seconds":[23.575]},
+    {"case_id":"app-normal-01","status":"invalid_json","provider_requests":1,"selected_diagnostic_ids":[],"assessment":"not_requested","latency_seconds":[18.73]},
+    {"case_id":"app-failure-01","status":"invalid_json","provider_requests":1,"selected_diagnostic_ids":[],"assessment":"not_requested","latency_seconds":[28.462]},
+    {"case_id":"app-failure-02","status":"invalid_json","provider_requests":1,"selected_diagnostic_ids":[],"assessment":"not_requested","latency_seconds":[17.136]},
+    {"case_id":"app-ambiguous-01","status":"invalid_assessment","provider_requests":2,"selected_diagnostic_ids":["application_health"],"catalog_validation":"valid","assessment":"rejected_by_schema_or_deterministic_validation","latency_seconds":[21.3,63.387]},
+    {"case_id":"db-normal-01","status":"invalid_json","provider_requests":1,"selected_diagnostic_ids":[],"assessment":"not_requested","latency_seconds":[17.605]},
+    {"case_id":"db-failure-01","status":"invalid_json","provider_requests":1,"selected_diagnostic_ids":[],"assessment":"not_requested","latency_seconds":[17.208]},
+    {"case_id":"db-failure-02","status":"invalid_json","provider_requests":1,"selected_diagnostic_ids":[],"assessment":"not_requested","latency_seconds":[16.886]},
+    {"case_id":"db-conflict-01","status":"invalid_json","provider_requests":1,"selected_diagnostic_ids":[],"assessment":"not_requested","latency_seconds":[26.509]},
+    {"case_id":"network-normal-01","status":"invalid_json","provider_requests":1,"selected_diagnostic_ids":[],"assessment":"not_requested","latency_seconds":[22.555]},
+    {"case_id":"network-failure-01","status":"invalid_json","provider_requests":1,"selected_diagnostic_ids":[],"assessment":"not_requested","latency_seconds":[22.341]},
+    {"case_id":"network-failure-02","status":"invalid_json","provider_requests":1,"selected_diagnostic_ids":[],"assessment":"not_requested","latency_seconds":[22.333]},
+    {"case_id":"network-ambiguous-01","status":"invalid_assessment","provider_requests":2,"selected_diagnostic_ids":["network_health"],"catalog_validation":"valid","assessment":"rejected_by_schema_or_deterministic_validation","latency_seconds":[17.576,47.251]},
+    {"case_id":"insufficient-empty-01","status":"invalid_json","provider_requests":1,"selected_diagnostic_ids":[],"assessment":"not_requested","latency_seconds":[16.287]},
+    {"case_id":"insufficient-empty-02","status":"invalid_assessment","provider_requests":2,"selected_diagnostic_ids":["application_health","database_health","network_health","web_health"],"catalog_validation":"valid","assessment":"rejected_by_schema_or_deterministic_validation","latency_seconds":[17.474,29.267]},
+    {"case_id":"insufficient-ambiguous-01","status":"invalid_assessment","provider_requests":2,"selected_diagnostic_ids":["application_health","database_health","network_health","web_health"],"catalog_validation":"valid","assessment":"rejected_by_schema_or_deterministic_validation","latency_seconds":[13.957,28.228]},
+    {"case_id":"insufficient-conflict-01","status":"invalid_json","provider_requests":1,"selected_diagnostic_ids":[],"assessment":"not_requested","latency_seconds":[24.339]},
+    {"case_id":"insufficient-causal-01","status":"invalid_assessment","provider_requests":2,"selected_diagnostic_ids":["application_health","database_health","network_health","web_health"],"catalog_validation":"valid","assessment":"rejected_by_schema_or_deterministic_validation","latency_seconds":[25.263,57.23]},
+    {"case_id":"web-observation-only-01","status":"invalid_assessment","provider_requests":2,"selected_diagnostic_ids":["web_health","application_health"],"catalog_validation":"valid","assessment":"rejected_by_schema_or_deterministic_validation","latency_seconds":[28.137,58.699]},
+    {"case_id":"db-observation-only-01","status":"invalid_json","provider_requests":1,"selected_diagnostic_ids":[],"assessment":"not_requested","latency_seconds":[22.236]}
+  ],
+  "evaluation": {
+    "diagnostic_selection": {
+      "scored_cases_with_valid_selection_responses": 6,
+      "exact_match_accuracy": 0.3333333333333333,
+      "micro_precision": 0.25,
+      "micro_recall": 1.0,
+      "micro_f1": 0.4,
+      "macro_precision_excluding_undefined_empty_sets": 0.4583333333333333,
+      "macro_recall_excluding_undefined_empty_sets": 1.0,
+      "macro_f1_excluding_undefined_empty_sets": 0.5111111111111111,
+      "invalid_or_unknown_diagnostic_id_count": 0
+    },
+    "structured_assessment": {
+      "valid_assessments": 0,
+      "invalid_assessment_responses": 6,
+      "missing_or_invalid_selection_responses": 18,
+      "classification_accuracy": null,
+      "confusion_matrix": null,
+      "abstention_precision": null,
+      "abstention_recall": null,
+      "brier_score": null,
+      "expected_calibration_error": null,
+      "interpretation": "NOT MEASURED: no valid structured assessment was accepted"
+    },
+    "citations": {
+      "valid_assessment_citations_available": 0,
+      "integrity": "NOT MEASURED",
+      "semantic_adjudication_coverage": "NOT MEASURED",
+      "note": "Reference syntax or overlap does not establish semantic support"
+    }
+  },
+  "synthetic_database": {
+    "integrity_check": "ok",
+    "foreign_key_violations": 0,
+    "audit_chain_valid": true,
+    "audit_event_count": 0,
+    "evaluation_used_database": false,
+    "operational_database_accessed": false
+  },
+  "safety": {
+    "ssh_or_tunnel": "not_run",
+    "managed_vm_contact": "not_run",
+    "real_diagnostic_execution": "not_run",
+    "remediation": "not_run",
+    "operational_deployment": "not_authorized",
+    "tunnel_authorization": "not_authorized"
+  },
+  "artifacts": {
+    "private_acceptance_directory": "retained under the existing owner-only staging directory; path omitted from this report",
+    "prediction_artifact_sha256_verified": true,
+    "prediction_artifact_sha256": "33d91c353817df0c681fae33379a7ddf7e86a3bf8438e89ffb23d4ac9834457b",
+    "raw_prompts_or_raw_responses_in_report": false,
+    "temporary_api_key_or_configuration": "cleaned by runner; API-key file was not modified"
+  }
+}

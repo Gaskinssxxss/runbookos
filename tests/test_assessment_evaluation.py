@@ -260,7 +260,7 @@ def test_missing_assessment_is_treated_as_abstention_and_unanswered(dataset):
     assert result["ground_truth_availability"]["evaluated_cases"] == 0
 
 
-def test_prediction_without_assessment_is_an_abstention(dataset):
+def test_prediction_without_assessment_is_not_valid_abstention(dataset):
     case = next(item for item in dataset.cases if not item.gold.expected_abstention)
     prediction = CasePrediction(
         case_id=case.case_id, diagnostic_ids=case.gold.expected_diagnostic_ids
@@ -273,8 +273,12 @@ def test_prediction_without_assessment_is_an_abstention(dataset):
             predictions=[prediction],
         ),
     )
-    assert result["classification"]["coverage"] == 0
-    assert result["abstention"]["false_abstention_rate"] == 1
+    assert result["evaluation_status"] == "PARTIAL"
+    assert result["ground_truth_availability"]["assessment_missing_count"] == 1
+    assert result["classification"]["coverage"] is None
+    assert result["abstention"]["false_abstention_rate"] is None
+    summary = next(item for item in result["case_summaries"] if item["case_id"] == case.case_id)
+    assert summary["predicted_abstention"] is None
 
 
 def test_unsupported_classification_and_nonfinite_confidence_are_rejected():

@@ -10,6 +10,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -19,8 +20,14 @@ from typer.testing import CliRunner
 
 from runbookos.adapters.alertmanager import normalize_alertmanager
 from runbookos.adapters.alertmanager_bridge import create_server as create_signing_bridge
+from runbookos.assessment import (
+    ClassificationAssessment,
+    StructuredAssessment,
+    UnknownClaim,
+    validate_assessment,
+)
 from runbookos.cli import app
-from runbookos.errors import PolicyDenied
+from runbookos.errors import ConfigurationError, PolicyDenied
 from runbookos.incidents import IncidentStore, parse_alert, validate_target
 from runbookos.store import SQLiteStore
 from runbookos.webhook import create_server
@@ -217,6 +224,70 @@ def test_investigation_link_requires_stored_verified_reference(tmp_path: Path):
     with pytest.raises(PolicyDenied):
         incidents.link_investigation(ingested["incident_id"], inv_id, [], ["fake:step"])
     incidents.link_investigation(ingested["incident_id"], inv_id, [execution_id], [ref])
+    investigation_before = store.investigation_detail(inv_id)
+    proposal_body = {
+        "proposal_version": 1,
+        "incident_id": ingested["incident_id"],
+        "investigation_id": inv_id,
+        "evidence_refs": [ref],
+        "suspected_fault_category": "service_failure",
+        "uncertainty": 0.2,
+        "causal_hypothesis": "The registered endpoint may be unavailable.",
+        "candidate_action_id": "systemd.restart",
+        "target_ref": "example-web-01",
+        "expected_recovery_effect": "The service may return to readiness.",
+        "rationale": "The cited evidence records an unsuccessful readiness observation.",
+        "contraindications": [],
+        "abstain": False,
+        "validation": {
+            "accepted": True,
+            "abstained": False,
+            "candidate": {
+                "action_id": "systemd.restart",
+                "target_ref": "example-web-01",
+                "target_name": "example-web-01",
+                "arguments": {"unit": "runbookos-campaign-b03-api.service"},
+            },
+        },
+    }
+    # Exercise the real semantic-v2 -> canonical-v1 -> SQLite/audit boundary.
+    from runbookos.remediation_proposal import RemediationProposalReplyV1, decode_semantic_proposal
+
+    semantic = {
+        key: value
+        for key, value in proposal_body.items()
+        if key in RemediationProposalReplyV1.model_fields
+        and key not in {"incident_id", "investigation_id"}
+    }
+    semantic["proposal_version"] = 2
+    canonical = decode_semantic_proposal(
+        json.dumps(semantic), incident_id=ingested["incident_id"], investigation_id=inv_id
+    )
+    proposal_body.update(canonical.model_dump(mode="json"))
+    proposal_hash = store.record_remediation_proposal(
+        incident_id=ingested["incident_id"],
+        investigation_id=inv_id,
+        proposal=proposal_body,
+        decision="accepted",
+        reason_code="registered_candidate_validated",
+    )
+    assert len(proposal_hash) == 64
+    assert (
+        store.remediation_proposals(ingested["incident_id"])[0]["proposal_sha256"] == proposal_hash
+    )
+    assert store.investigation_detail(inv_id) == investigation_before
+    with pytest.raises(ConfigurationError, match="linkage mismatch"):
+        store.record_remediation_proposal(
+            incident_id="other-incident",
+            investigation_id=inv_id,
+            proposal={
+                **proposal_body,
+                "incident_id": "other-incident",
+            },
+            decision="accepted",
+            reason_code="candidate_validated",
+        )
+    assert store.verify_audit_chain()[0]
     incidents.transition(ingested["incident_id"], "ACKNOWLEDGED", "operator", "reviewed alert")
     incidents.transition(ingested["incident_id"], "INVESTIGATING", "operator", "started checks")
     resolved = incidents.transition(
@@ -668,6 +739,20 @@ def test_incident_cli_runs_mocked_read_only_engine_and_audits_timeline(
     assert timeline.exit_code == 0, timeline.output
     timeline_doc = json.loads(timeline.output)
     assert timeline_doc["investigations"][0]["execution_ids"] == [investigation["execution_id"]]
+    # Partial recovery can require another bounded investigation of the same incident.
+    followup = runner.invoke(
+        app,
+        root
+        + ["incidents", "investigate", incident_id, "--runbook", str(tmp_path / "runbook.yml")],
+    )
+    assert followup.exit_code == 0, followup.output
+    second = json.loads(followup.output)
+    assert second["investigation_id"] != investigation["investigation_id"]
+    linked = IncidentStore(SQLiteStore(paths.database)).show(incident_id)["investigations"]
+    assert {item["investigation_id"] for item in linked} == {
+        investigation["investigation_id"],
+        second["investigation_id"],
+    }
     resolved = runner.invoke(
         app,
         root
@@ -691,12 +776,62 @@ def test_incident_cli_runs_mocked_read_only_engine_and_audits_timeline(
 
 def test_sqlite_backup_restore_preserves_incidents_and_audit(tmp_path: Path):
     source = SQLiteStore(tmp_path / "source.sqlite3")
-    incident = IncidentStore(source).ingest(parse_alert(json.dumps(payload()).encode()))
+    manager = IncidentStore(source)
+    alert = payload()
+    incident = manager.ingest(parse_alert(json.dumps(alert).encode()))
+    investigation_id = str(uuid.uuid4())
+    assessment = validate_assessment(
+        StructuredAssessment(
+            schema_version=1,
+            classification_catalog_version=2,
+            incident_id=incident["incident_id"],
+            investigation_id=investigation_id,
+            observations=[],
+            inferences=[],
+            hypotheses=[],
+            classifications=[
+                ClassificationAssessment(
+                    category="unknown",
+                    confidence=1.0,
+                    supporting_evidence_refs=[],
+                    status="undetermined",
+                )
+            ],
+            unknowns=[UnknownClaim(question="Is service health known?", missing_evidence=[])],
+            recommended_next_steps=[],
+            overall_uncertainty=1.0,
+            assessment_status="abstained",
+        )
+    )
+    investigation_id = source.create_investigation(
+        {
+            "incident_sha256": hashlib.sha256(alert["summary"].encode()).hexdigest(),
+            "status": "succeeded",
+            "selected_diagnostics": [],
+            "tool_calls": 0,
+            "evidence": [],
+            "verified_evidence": [],
+            "report": {},
+            "assessment": assessment.model_dump(mode="json"),
+            "model_metadata": {"provider": "offline-test", "model": "fake"},
+        },
+        investigation_id=investigation_id,
+    )
+    manager.link_investigation(incident["incident_id"], investigation_id, [], [])
     backup_path = tmp_path / "backup.sqlite3"
     with sqlite3.connect(source.path) as src, sqlite3.connect(backup_path) as dst:
         src.backup(dst)
     restored = SQLiteStore(backup_path)
-    assert IncidentStore(restored).show(incident["incident_id"])["status"] == "NEW"
+    restored_incident = IncidentStore(restored).show(incident["incident_id"])
+    assert restored_incident["status"] == "NEW"
+    assert restored_incident["investigations"][0]["investigation_id"] == investigation_id
+    detail = restored.investigation_detail(investigation_id)
+    assert detail is not None and detail["result_integrity"] == "valid"
+    assert detail["result"]["assessment"] == assessment.model_dump(mode="json")
+    with sqlite3.connect(backup_path) as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert db.execute("PRAGMA foreign_key_check").fetchall() == []
     assert restored.verify_audit_chain()[0]
 
 

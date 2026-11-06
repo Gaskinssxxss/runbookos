@@ -301,12 +301,22 @@ def make_observations(
         observed_result = item.get("evidence")
         if not isinstance(observed_result, dict):
             observed_result = {"value": observed_result}
+        if (
+            item.get("source") == "synthetic_demo_fixture"
+            and item.get("diagnostic_executed") is False
+        ):
+            statement = (
+                f"Synthetic fixture observation for {item['target']} "
+                f"(not an executed diagnostic): {item.get('description', 'fixture value recorded')}."
+            )
+        else:
+            statement = (
+                f"Diagnostic step {item['step_id']} used {item['action']} on "
+                f"{item['target']} and finished with status {status}."
+            )
         observations.append(
             EvidenceObservation(
-                statement=(
-                    f"Diagnostic step {item['step_id']} used {item['action']} on "
-                    f"{item['target']} and finished with status {status}."
-                ),
+                statement=statement,
                 ref=item["ref"],
                 evidence_refs=[item["ref"]],
                 execution_id=item["execution_id"],
@@ -475,7 +485,7 @@ def project_investigation_assessment(
         "availability": "unavailable",
         "evaluation_status": "NOT AVAILABLE",
         "semantic_support_status": "unverified",
-        "confidence_label": "model-reported; uncalibrated",
+        "confidence_label": "origin unavailable",
     }
     if record is None:
         return base | {"availability": "missing_investigation", "reason": "investigation_not_found"}
@@ -489,6 +499,22 @@ def project_investigation_assessment(
     result = record.get("result")
     if not isinstance(result, dict):
         return base | {"availability": "malformed", "reason": "investigation_result_malformed"}
+    model_metadata = result.get("model_metadata")
+    if result.get("assessment_origin") == "synthetic_demo_fixture":
+        confidence_label = "synthetic demo fixture; not model output"
+        evidence_origin = "synthetic demo fixture; no diagnostic executed"
+    elif (
+        isinstance(model_metadata, dict)
+        and isinstance(model_metadata.get("provider"), str)
+        and model_metadata["provider"] not in {"", "none"}
+        and isinstance(model_metadata.get("model_calls"), int)
+        and model_metadata["model_calls"] > 0
+    ):
+        confidence_label = "model-reported; uncalibrated"
+        evidence_origin = "persisted investigation evidence; see observation provenance"
+    else:
+        confidence_label = "origin unavailable"
+        evidence_origin = "persisted investigation evidence; origin not classified"
     if result.get("incident_sha256") != incident_summary_sha256:
         return base | {
             "availability": "incident_mismatch",
@@ -496,6 +522,26 @@ def project_investigation_assessment(
         }
     assessment_raw = result.get("assessment")
     if assessment_raw is None:
+        failure = result.get("assessment_failure")
+        if (
+            isinstance(failure, dict)
+            and failure.get("stage") in {"selection", "assessment"}
+            and failure.get("category")
+            in {
+                "policy_rejected",
+                "provider_configuration_error",
+                "provider_or_contract_error",
+                "internal_error",
+            }
+        ):
+            return base | {
+                "availability": "assessment_failed",
+                "assessment_status": "assessment_failed",
+                "investigation_status": record.get("status"),
+                "failure_stage": failure["stage"],
+                "failure_category": failure["category"],
+                "reason": "assessment_generation_failed; raw provider output was not persisted",
+            }
         return base | {
             "availability": "legacy",
             "assessment_status": "legacy_unavailable",
@@ -548,7 +594,8 @@ def project_investigation_assessment(
         "overall_uncertainty": assessment.overall_uncertainty,
         "semantic_support_status": assessment.semantic_support_status,
         "recommendations_are_executable": assessment.recommendations_are_executable,
-        "confidence_label": "model-reported; uncalibrated",
+        "confidence_label": confidence_label,
+        "evidence_origin": evidence_origin,
         "evaluation_status": "NOT MEASURED",
         "reason": None,
     }

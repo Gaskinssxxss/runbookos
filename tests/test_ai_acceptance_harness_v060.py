@@ -66,40 +66,38 @@ class ScenarioProvider:
             )
             response = {"diagnostic_ids": [selection] if selection else []}
         else:
-            refs = payload["valid_evidence_refs"]
+            refs = payload["evidence_refs"]
             response = {
-                "hypotheses": (
-                    [
-                        {
-                            "statement": "Synthetic test observation only.",
-                            "confidence": 0.5,
-                            "evidence_refs": [refs[0]],
-                        }
-                    ]
+                "reply_version": 2,
+                "category": "service_failure" if refs else "unknown",
+                "confidence": 0.5 if refs else 0.95,
+                "evidence_ids": [refs[0]] if refs else [],
+                "reason": (
+                    "Synthetic test observation only."
                     if refs
-                    else []
+                    else "Fixture evidence is insufficient."
                 ),
-                "recommended_next_steps": [],
+                "abstain": not refs,
+                "overall_uncertainty": 0.5 if refs else 0.95,
             }
         return ModelReply(json.dumps(response), self.provider_name, 0.001, {"total_tokens": 1})
 
 
 def _analysis(calls):
     payload = json.loads(calls[-1][1])
-    refs = payload["valid_evidence_refs"]
+    refs = payload["evidence_refs"]
     return {
-        "hypotheses": (
-            [
-                {
-                    "statement": "A synthetic observation supports this bounded hypothesis.",
-                    "confidence": 0.5,
-                    "evidence_refs": [refs[0]],
-                }
-            ]
+        "reply_version": 2,
+        "category": "service_failure" if refs else "unknown",
+        "confidence": 0.5 if refs else 0.95,
+        "evidence_ids": [refs[0]] if refs else [],
+        "reason": (
+            "A synthetic observation supports this bounded hypothesis."
             if refs
-            else []
+            else "Fixture evidence is insufficient."
         ),
-        "recommended_next_steps": ["An operator may review the synthetic diagnostic result."],
+        "abstain": not refs,
+        "overall_uncertainty": 0.5 if refs else 0.95,
     }
 
 
@@ -187,14 +185,13 @@ def test_adversarial_incident_is_rejected_before_provider_or_executor(tmp_path: 
         (
             {"diagnostic_ids": ["web_health"]},
             {
-                "hypotheses": [
-                    {
-                        "statement": "Forged citation.",
-                        "confidence": 0.9,
-                        "evidence_refs": ["R99"],
-                    }
-                ],
-                "recommended_next_steps": [],
+                "reply_version": 2,
+                "category": "service_failure",
+                "confidence": 0.9,
+                "evidence_ids": ["R99"],
+                "reason": "Forged citation.",
+                "abstain": False,
+                "overall_uncertainty": 0.1,
             },
             PolicyDenied,
         ),
@@ -286,7 +283,7 @@ def test_sanitized_policy_denial_trace_records_stage_without_raw_response(tmp_pa
     assert case["catalog_validation"] == "rejected"
     assert case["diagnostic_ids_returned"] == ["arbitrary_shell"]
     assert case["executor_invoked"] is False
-    assert case["investigation_persisted"] is False
+    assert case["investigation_persisted"] is True
     assert case["provider_requests"] == 1
     serialized = json.dumps(case)
     assert "private rationale" not in serialized
@@ -347,7 +344,7 @@ def test_diagnostic_selection_contract_exact_limit_and_failures(
             {"diagnostic_ids": ["web_health", "application_health", "database_health"]},
             "max_diagnostic_runbooks",
         ),
-        ({"diagnostic_ids": ["web_health", "web_health"]}, "duplicates"),
+        ({"diagnostic_ids": ["web_health", "web_health"]}, "duplicate"),
         ({"diagnostic_ids": ["arbitrary_shell"]}, "unregistered diagnostic"),
     ],
 )
@@ -363,7 +360,10 @@ def test_invalid_selection_fails_before_any_fake_diagnostic(
     assert len(provider.calls) == 1
     assert executor.calls == []
     store = SQLiteStore(paths.database)
-    assert store.investigations() == []
+    investigations = store.investigations()
+    assert len(investigations) == 1
+    assert investigations[0]["result"]["status"] == "failed"
+    assert investigations[0]["result"]["assessment_failure"]["stage"] == "selection"
     assert store.verify_audit_chain()[0]
 
 

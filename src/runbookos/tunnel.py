@@ -10,7 +10,7 @@ import subprocess
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from .config import read_yaml
 from .errors import ConfigurationError, RunbookOSError
@@ -35,7 +35,15 @@ class TunnelConfig(BaseModel):
     known_hosts_file: Path
     local_port: int = Field(default=8080, ge=1024, le=65535)
     remote_host: Literal["127.0.0.1"] = "127.0.0.1"
-    remote_port: Literal[8080] = 8080
+    remote_port: int = Field(default=8080, ge=1, le=65535)
+
+    @model_validator(mode="after")
+    def validate_remote_endpoint(self) -> "TunnelConfig":
+        # llama.cpp deployments in the local acceptance environment use 18080;
+        # retain the historical 8080 default while keeping destinations allowlisted.
+        if self.remote_port not in {8080, 18080}:
+            raise ValueError("remote_port must identify an approved local inference endpoint")
+        return self
 
     @field_validator("host")
     @classmethod

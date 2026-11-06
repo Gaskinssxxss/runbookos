@@ -438,6 +438,18 @@ class RunbookEngine:
                 "unit_allowed_for_target": bool(
                     host_policy and action.arguments.get("unit") in host_policy.allowed_units
                 ),
+                "arguments_scope_allowed": bool(
+                    host_policy
+                    and action.action in host_policy.remediation_actions
+                    and (
+                        action.arguments.get("unit") is None
+                        or action.arguments.get("unit") in host_policy.allowed_units
+                    )
+                    and (
+                        action.arguments.get("endpoint_id") is None
+                        or action.arguments.get("endpoint_id") in host_policy.allowed_probe_targets
+                    )
+                ),
                 "approval_required": action.approval_required,
             },
             "expected_service_impact": definition.expected_impact,

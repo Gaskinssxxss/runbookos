@@ -11,7 +11,7 @@ RunbookOS is a lightweight Python CLI for validating, planning, running, and aud
 - The SSH adapter uses public-key authentication only, pinned `known_hosts`, `StrictHostKeyChecking=yes`, `-F /dev/null`, no agent forwarding, no proxy, no password prompt, no sudo, and no retry.
 - A lost SSH connection, client timeout, or malformed remote response after dispatch is recorded as `unknown`. The engine stops the run and does not retry.
 - SQLite state is created with owner-only permissions. Audit events form a SHA-256 hash chain. This is tamper-evident, not a signed or remote immutable audit log.
-- The optional investigator can select only IDs in a local diagnostic catalog. Each selected runbook is re-planned through the normal registry and default-deny policy, then executed as read-only through the normal SSH engine. Model output cannot provide commands, change policy, or invoke remediation.
+- The optional investigator can select only IDs in a local diagnostic catalog. Each selected runbook is re-planned through the normal registry and default-deny policy, then executed as read-only through the normal SSH engine. Minimal Semantic Reply v2 lets the model return a constrained classification, confidence, issued evidence aliases, short explanation, uncertainty, or abstention. Python supplies identity and provenance, and the existing assessment validator remains authoritative. Model output cannot provide commands, change policy, mark evidence verified, approve, or invoke remediation.
 - AI is disabled unless `runbookos investigate` is explicitly invoked. Incident text is not persisted; investigation history stores its SHA-256, model metadata, findings, evidence references, and recommendations. Treat the configured model provider as a recipient of the incident and bounded diagnostic evidence.
 - Alert ingestion creates or correlates incident records but never starts diagnostics. Operators must acknowledge and explicitly request an investigation. Alert text and metadata remain untrusted data.
 - The optional HMAC webhook is foreground-only, loopback-bound, size/concurrency/rate limited, and uses timestamped nonces. It is not a remote or production listener.
@@ -60,6 +60,8 @@ The incident-plan association uses an additive SQLite migration. Historical plan
 ## v0.7.0 evidence-aware assessment and review
 
 Investigations can persist a versioned `StructuredAssessment` separating direct diagnostic observations from model inferences, hypotheses, classifications, unknowns, and advisory next steps. Deterministic validation checks schema, taxonomy, evidence references, claim constraints, and assertion/verification provenance. Citations establish reference integrity only; semantic support remains unverified unless independently adjudicated. Model-reported confidence is uncalibrated.
+
+The production incident investigation now uses the same Minimal Semantic Reply v2 contract as the offline M3 adapter. Successful assessments are persisted and displayed read-only; provider or contract failures are stored as sanitized failed investigations without raw prompts or model responses. The existing operator workflow does not execute remediation from an assessment.
 
 The M3 evaluator is a separate offline component with a 24-case synthetic held-out dataset. Evaluator reference predictions test metric behavior but are not Qwen outputs. The checked-in M3 evaluation report contains no model predictions; Qwen performance on the held-out cases is **NOT MEASURED**. `runbookos incidents show ID` adds a read-only assessment projection, and the authenticated loopback dashboard displays linked investigations separately. Legacy investigations remain readable with assessment `NOT AVAILABLE`. Neither view starts diagnostics, AI, SSH, approval, or remediation. See the [M1/M2 completion](docs/v0.7.0-m1-m2-completion.md), [M3 evaluation report](docs/v0.7.0-m3-evaluation-report.md), and [M4 completion](docs/v0.7.0-m4-completion.md).
 
@@ -147,6 +149,16 @@ Read-only actions include `systemd.is_active`, `systemd.failed_units`, `os.uptim
 AI configuration is in `config/investigation.example.yml`; the provider example points to loopback `http://127.0.0.1:8080/v1`. The tunnel command disables user SSH config, password authentication, agent forwarding, shell, TTY, and all unspecified forwards. The host's `llama-server` must bind to loopback and require an API key. No model is installed on the controller. Lab-specific inventory, tunnel configuration, and provisioning artifacts are not shipped in release packages.
 
 See [architecture](docs/architecture.md), [AI investigation](docs/ai-investigation.md), [runbook schema](docs/runbook-schema.md), [security model](docs/security.md), and [operations](docs/operations.md).
+
+## Offline operator demo
+
+The demo creates a fresh temporary SQLite database, inserts a clearly labeled synthetic incident and assessment through the existing constructors, displays the incident through the CLI, and starts the existing authenticated dashboard on loopback. It performs no provider request, diagnostic, SSH connection, or remediation. Run it from a terminal and use Ctrl-C to stop the owned dashboard and remove temporary state:
+
+```sh
+.venv/bin/python scripts/operator-demo-v070.py
+```
+
+The script asks for a temporary dashboard password without echoing it, prints the incident ID and loopback URL, and cleans up its temporary database and credentials after shutdown. See [`docs/operator-demo-v0.7.0.md`](docs/operator-demo-v0.7.0.md).
 
 Incident fixtures and metric definitions are documented in [incident simulation and evaluation](docs/incident-evaluation.md). The offline scripted provider is only a harness check; fixture results are not evidence of AI accuracy on real incidents. `config/evaluation.qwen.example.yml` shows the optional local provider config. Bounded probe target setup and signal interpretation are documented in [diagnostic actions](docs/diagnostic-actions-v0.2.3.md). Fault injection is not implemented, and no homelab service is modified by `evaluate`.
 

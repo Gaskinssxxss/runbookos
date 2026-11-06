@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import base64
 import http.client
+import io
 import json
+import os
 import socket
 import ssl
+import subprocess
 import sys
+import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -129,10 +134,12 @@ class FakeSocket:
         self.timeout = timeout
 
 
-def run_remote(monkeypatch: pytest.MonkeyPatch, capsys, action: str, endpoint: dict, timeout=4):
+def run_remote_request(
+    monkeypatch: pytest.MonkeyPatch, capsys, action: str, arguments: dict, timeout=4
+):
     request = {
         "action": action,
-        "arguments": {"endpoint_id": "service_probe", "_endpoint": endpoint},
+        "arguments": arguments,
         "timeout_seconds": timeout,
     }
     encoded = base64.b64encode(json.dumps(request).encode()).decode()
@@ -140,6 +147,16 @@ def run_remote(monkeypatch: pytest.MonkeyPatch, capsys, action: str, endpoint: d
     namespace = {"__name__": "__main__"}
     exec(compile(REMOTE_SOURCE, "<runbookos-remote-test>", "exec"), namespace)
     return json.loads(capsys.readouterr().out)
+
+
+def run_remote(monkeypatch: pytest.MonkeyPatch, capsys, action: str, endpoint: dict, timeout=4):
+    return run_remote_request(
+        monkeypatch,
+        capsys,
+        action,
+        {"endpoint_id": "service_probe", "_endpoint": endpoint},
+        timeout,
+    )
 
 
 def test_tcp_probe_reports_result_without_exposing_payload(monkeypatch, capsys) -> None:
@@ -193,6 +210,31 @@ def test_tcp_timeout_is_recorded_as_negative_evidence(monkeypatch, capsys) -> No
     assert result["data"]["reachable"] is False
     assert result["error"] == "TimeoutError"
     assert "do not persist" not in json.dumps(result)
+
+
+def test_systemd_restart_uses_noninteractive_sudo_but_diagnostics_do_not(monkeypatch, capsys):
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return SimpleNamespace(returncode=0, stdout="active\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    restarted = run_remote_request(
+        monkeypatch, capsys, "systemd.restart", {"unit": "runbookos-campaign-b03-app.service"}
+    )
+    assert restarted["ok"] is True
+    assert calls[-1][0] == [
+        "/usr/bin/sudo",
+        "-n",
+        "/usr/bin/systemctl",
+        "restart",
+        "runbookos-campaign-b03-app.service",
+    ]
+
+    active = run_remote_request(monkeypatch, capsys, "systemd.is_active", {"unit": "nginx.service"})
+    assert active["ok"] is True
+    assert calls[-1][0] == ["/usr/bin/systemctl", "is-active", "nginx.service"]
 
 
 def test_http_redirect_not_followed_and_response_body_not_recorded(monkeypatch, capsys) -> None:
@@ -294,3 +336,198 @@ def test_probe_source_has_redirects_disabled_and_verified_tls() -> None:
     assert "ssl.create_default_context()" in REMOTE_SOURCE
     assert '"redirect_followed":False' in REMOTE_SOURCE
     assert "response.status" in REMOTE_SOURCE
+
+
+def test_journal_tail_is_registered_bounded_and_rejects_command_text(monkeypatch, capsys) -> None:
+    from runbookos.actions import validate_action
+
+    action = validate_action("systemd.journal_tail", {"unit": "nginx.service", "lines": 5})
+    assert action.read_only is True
+    assert action.max_timeout_seconds == 10
+    for args in (
+        {"unit": "nginx.service;touch /tmp/pwned"},
+        {"unit": "nginx.service", "lines": 51},
+        {"unit": "nginx.service", "lines": True},
+        {"unit": "nginx.service", "command": "id"},
+    ):
+        with pytest.raises(ConfigurationError):
+            validate_action("systemd.journal_tail", args)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("invalid unit must be rejected before subprocess creation")
+
+    monkeypatch.setattr("subprocess.Popen", forbidden)
+    result = run_remote_request(
+        monkeypatch,
+        capsys,
+        "systemd.journal_tail",
+        {"unit": "nginx.service;id", "lines": 5},
+    )
+    assert result["ok"] is False
+    assert result["error"] == "ValueError: journal unit denied"
+
+
+def test_journal_tail_bounds_bytes_and_redacts_sensitive_log_text(monkeypatch, capsys) -> None:
+    payload = (
+        json.dumps(
+            {
+                "__REALTIME_TIMESTAMP": "1761500000000000",
+                "PRIORITY": "3",
+                "MESSAGE": "failed token=abc123 bearer secret-value",
+            }
+        )
+        + "\n"
+    ).encode()
+    read_fd, write_fd = os.pipe()
+
+    class FakeProcess:
+        def __init__(self):
+            self.stdout = os.fdopen(read_fd, "rb")
+            self._returncode = 0
+            self.killed = False
+
+        def wait(self, timeout=None):
+            return self._returncode
+
+        def poll(self):
+            return self._returncode
+
+        def kill(self):
+            self.killed = True
+            try:
+                os.close(write_fd)
+            except OSError:
+                pass
+
+    proc = FakeProcess()
+    thread = threading.Thread(target=lambda: (os.write(write_fd, payload), os.close(write_fd)))
+    thread.start()
+    captured = {}
+
+    def fake_popen(argv, **kwargs):
+        captured.update(argv=argv, kwargs=kwargs)
+        return proc
+
+    monkeypatch.setattr("subprocess.Popen", fake_popen)
+    result = run_remote_request(
+        monkeypatch,
+        capsys,
+        "systemd.journal_tail",
+        {"unit": "nginx.service", "lines": 1},
+    )
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+    assert result["ok"] is True
+    assert result["data"]["entry_count"] == 1
+    assert "[REDACTED]" in result["data"]["entries"][0]["message"]
+    assert "abc123" not in json.dumps(result)
+    assert captured["argv"][:4] == ["/usr/bin/journalctl", "--unit", "nginx.service", "--lines"]
+    assert captured["kwargs"]["start_new_session"] is True
+
+
+def test_journal_tail_stops_when_remote_output_exceeds_hard_limit(monkeypatch, capsys):
+    read_fd, write_fd = os.pipe()
+
+    class FakeProcess:
+        def __init__(self):
+            self.stdout = os.fdopen(read_fd, "rb")
+            self._returncode = None
+            self.killed = False
+
+        def wait(self, timeout=None):
+            if self.killed:
+                self._returncode = -9
+            else:
+                self._returncode = 0
+            return self._returncode
+
+        def poll(self):
+            return self._returncode
+
+        def kill(self):
+            self.killed = True
+            try:
+                os.close(write_fd)
+            except OSError:
+                pass
+
+    proc = FakeProcess()
+    payload = b"x" * 65537
+
+    def feed():
+        offset = 0
+        try:
+            while offset < len(payload):
+                offset += os.write(write_fd, payload[offset:])
+        except OSError:
+            pass
+        finally:
+            try:
+                os.close(write_fd)
+            except OSError:
+                pass
+
+    thread = threading.Thread(target=feed)
+    thread.start()
+    monkeypatch.setattr("subprocess.Popen", lambda *args, **kwargs: proc)
+    result = run_remote_request(
+        monkeypatch,
+        capsys,
+        "systemd.journal_tail",
+        {"unit": "nginx.service", "lines": 50},
+    )
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+    assert result["ok"] is False
+    assert result["error"] == "output_limit"
+    assert proc.killed is True
+
+
+def test_resolver_config_is_bounded_read_only_and_policy_opt_in(tmp_path, monkeypatch, capsys):
+    from runbookos.actions import validate_action
+
+    assert validate_action("network.resolver_config", {}).read_only is True
+    paths = write_config_tree(tmp_path)
+    runbook = tmp_path / "resolver.yml"
+    runbook.write_text(
+        "api_version: runbookos/v1\nkind: Runbook\nmetadata:\n"
+        "  id: resolver-config-test\n  name: Resolver config\n  description: bounded test\n  risk: low\n"
+        "targets: [test-web]\nsteps:\n  - id: resolver\n"
+        "    action: network.resolver_config\n    timeout_seconds: 3\n",
+        encoding="utf-8",
+    )
+    assert RunbookEngine(paths).plan(runbook).status == "denied"
+    policy = yaml.safe_load(paths.policy.read_text())
+    policy["hosts"]["test-web"]["diagnostic_actions"].append("network.resolver_config")
+    paths.policy.write_text(yaml.safe_dump(policy))
+    assert RunbookEngine(paths).plan(runbook).status == "ready"
+
+    original_open = open
+
+    def fake_open(path, *args, **kwargs):
+        if path == "/etc/resolv.conf":
+            return io.StringIO(
+                "# sample\nnameserver 10.20.30.53\nsearch lab.example internal.example\n"
+                "nameserver 10.20.30.53\n"
+            )
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", fake_open)
+    result = run_remote_request(monkeypatch, capsys, "network.resolver_config", {})
+    assert result["ok"] is True
+    assert result["data"]["nameservers"] == ["10.20.30.53"]
+    assert result["data"]["search_domains"] == ["lab.example", "internal.example"]
+
+
+def test_resolver_config_rejects_oversized_file(monkeypatch, capsys):
+    original_open = open
+
+    def fake_open(path, *args, **kwargs):
+        if path == "/etc/resolv.conf":
+            return io.StringIO("x" * 4097)
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", fake_open)
+    result = run_remote_request(monkeypatch, capsys, "network.resolver_config", {})
+    assert result["ok"] is False
+    assert result["error"] == "resolver_config_exceeds_limit"

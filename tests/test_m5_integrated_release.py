@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import http.client
 import json
 import os
@@ -16,6 +17,7 @@ from typer.testing import CliRunner
 from runbookos.ai import (
     IncidentInvestigator,
     InvestigationConfig,
+    InvestigationFailure,
     ModelReply,
 )
 from runbookos.assessment import (
@@ -49,37 +51,15 @@ class _MockProvider:
         if len(self.requests) == 1:
             response = {"diagnostic_ids": ["web_health"]}
         else:
-            refs = json.loads(user)["valid_evidence_refs"]
+            refs = json.loads(user)["evidence_refs"]
             response = {
-                "inferences": [
-                    {
-                        "statement": "The registered status action observed nginx as inactive.",
-                        "evidence_refs": refs,
-                    }
-                ],
-                "hypotheses": [
-                    {
-                        "statement": "The web service process may not be running.",
-                        "confidence": 0.7,
-                        "evidence_refs": refs,
-                        "missing_evidence": ["Independent process inspection"],
-                        "disconfirming_checks": ["A repeated active status observation"],
-                    }
-                ],
-                "classifications": [
-                    {
-                        "category": "service_failure",
-                        "confidence": 0.7,
-                        "supporting_evidence_refs": refs,
-                        "status": "suspected",
-                    }
-                ],
-                "unknowns": [],
-                "recommended_next_steps": [
-                    "An operator may review a separate read-only service observation."
-                ],
+                "reply_version": 2,
+                "category": "service_failure",
+                "confidence": 0.7,
+                "evidence_ids": refs,
+                "reason": "The web service process may not be running.",
+                "abstain": False,
                 "overall_uncertainty": 0.55,
-                "assessment_status": "partial",
             }
         return ModelReply(json.dumps(response), "synthetic-reference-only", 0.001)
 
@@ -323,7 +303,7 @@ def test_m5_synthetic_incident_to_authenticated_review_and_reference_evaluation(
         assert status == 200
         assert investigation["investigation_id"] in html
         assert "assertion: failed" in html and "verification: not_verified" in html
-        assert "model-reported confidence 0.7 (uncalibrated)" in html
+        assert "model-reported; uncalibrated: 0.7" in html
         assert "semantic support: unverified" in html
         assert "NOT MEASURED" in html
         assert "synthetic-m5-secret-value" not in html
@@ -349,3 +329,109 @@ def test_m5_synthetic_incident_to_authenticated_review_and_reference_evaluation(
     assert evaluation["diagnostic_selection"]["exact_match_accuracy"] == 1.0
     assert evaluation["classification"]["exact_accuracy"] == 1.0
     assert evaluation["evaluation_status"] == "COMPLETE"
+
+
+def test_cli_links_sanitized_investigation_failure_without_showing_a_diagnosis(
+    tmp_path: Path, monkeypatch
+):
+    paths = write_config_tree(tmp_path / "failure-runtime")
+    summary = "Synthetic application diagnostic failure"
+    alert = {
+        "alert_id": "failure-alert-1",
+        "source": "synthetic-monitor",
+        "event_timestamp": datetime.now(UTC).isoformat(),
+        "severity": "error",
+        "target_alias": "test-web",
+        "service": "nginx",
+        "category": "service",
+        "summary": summary,
+        "fingerprint": "failure-fingerprint",
+        "metadata": {},
+    }
+    incidents = IncidentStore(SQLiteStore(paths.database))
+    incident_id = incidents.ingest(parse_alert(json.dumps(alert).encode()))["incident_id"]
+    incidents.transition(
+        incident_id, "ACKNOWLEDGED", "synthetic-operator", "approved synthetic investigation"
+    )
+    investigation_id = "sanitized-failure-investigation"
+    store = SQLiteStore(paths.database)
+    store.create_investigation(
+        {
+            "incident_sha256": hashlib.sha256(summary.encode()).hexdigest(),
+            "status": "failed",
+            "selected_diagnostics": [],
+            "tool_calls": 0,
+            "evidence": [],
+            "verified_evidence": [],
+            "assessment_failure": {
+                "stage": "assessment",
+                "category": "provider_or_contract_error",
+                "reason_category": "provider_or_contract_error",
+                "error_type": "RunbookOSError",
+            },
+            "model_metadata": {"provider": "synthetic", "model": "mock", "model_calls": 2},
+        },
+        investigation_id=investigation_id,
+    )
+
+    class FailedInvestigator:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def investigate(self, *args, **kwargs):
+            raise InvestigationFailure(
+                investigation_id,
+                "assessment",
+                [],
+                public_detail="provider or assessment contract failed",
+            )
+
+    config_path = tmp_path / "investigation.yml"
+    config_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "provider": {
+                    "type": "openai_compatible",
+                    "base_url": "http://127.0.0.1:8080/v1",
+                    "model": "mock-only",
+                },
+                "limits": {"max_diagnostic_runbooks": 1},
+                "catalog": [
+                    {
+                        "id": "web_health",
+                        "runbook": str(tmp_path / "failure-runtime/runbook.yml"),
+                        "description": "Synthetic read-only check",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("runbookos.cli.IncidentInvestigator", FailedInvestigator)
+    monkeypatch.setattr("runbookos.cli.build_provider", lambda _: object())
+    common = [
+        "--inventory",
+        str(paths.inventory),
+        "--policy",
+        str(paths.policy),
+        "--ssh-profiles",
+        str(paths.ssh_profiles),
+        "--db",
+        str(paths.database),
+    ]
+    runner = CliRunner()
+    invoked = runner.invoke(
+        app,
+        common + ["incidents", "investigate", incident_id, "--ai-config", str(config_path)],
+    )
+    assert invoked.exit_code == 2
+    assert "sanitized record" in invoked.stderr
+    shown = runner.invoke(app, common + ["incidents", "show", incident_id])
+    assert shown.exit_code == 0, shown.output
+    projection = json.loads(shown.output)["latest_investigation_assessment"]
+    assert projection["availability"] == "assessment_failed"
+    assert projection["failure_stage"] == "assessment"
+    assert "hypotheses" not in projection
+    assert "classifications" not in projection
+    assert store.verify_audit_chain()[0]

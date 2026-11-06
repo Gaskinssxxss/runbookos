@@ -1,0 +1,151 @@
+schema_version: 1
+milestone: runbookos-v0.6.0-local-qwen-acceptance
+authorization_status: NOT_AUTHORIZED
+scope:
+  purpose: >-
+    Bounded synthetic-evidence inference acceptance using the existing Qwen model,
+    real v0.6.0 IncidentInvestigator, and a test-only fake read-only executor.
+  excluded: [live_ssh, managed_vm_access, remediation, ai_execution, operational_deployment]
+inputs:
+  model:
+    path: /home/morphious/models/llama.cpp/qwen3.5-9b-instruct-q5_k_m.gguf
+    size_bytes: 6577841376
+    sha256: dc2a39aef291f91a9116ad214058da0d86eb648743a124bd8c333787c4b9c91c
+  server:
+    path: /home/morphious/.local/bin/llama-server
+    reported_version: 0.6.0-dev (build 11479, commit 42c787e8c)
+    sha256: 98a8581124ccf8ba775a89e1899c895b2d4a2053b9830f8b044fe69b928c02ac
+    proposed_arguments:
+      - --model /home/morphious/models/llama.cpp/qwen3.5-9b-instruct-q5_k_m.gguf
+      - --host 127.0.0.1
+      - --port 8080
+      - --alias qwen3.5-9b-instruct
+      - --ctx-size 12288
+      - --parallel 1
+      - --threads 4
+      - --threads-batch 4
+      - --timeout 130
+      - --reasoning off
+      - --reasoning-format none
+      - --reasoning-budget 0
+      - --api-key-file /home/morphious/.config/runbookos/llama-api-key
+      - --no-webui
+    current_state_at_preflight: stopped_no_listener_on_127.0.0.1_8080
+  source:
+    host: ops-01
+    address: 10.60.10.10
+    os_account: runbookos
+    installation: /var/lib/runbookos/acceptance-v060/
+    installation_status: not_locally_verifiable_in_current_preparation_session
+  inference_host:
+    host: ubuntu-physical-host
+    address: 192.168.100.145
+    ssh_account: runbookos-tunnel
+    ssh_port: 22
+    tunnel_identity_path: /var/lib/runbookos/.ssh/llama_tunnel_ed25519
+    tunnel_identity_public_fingerprint: SHA256:yDDP5tent7OSBOGUeU0IwqMHSjsM4szXNBsYrlU6rvA
+    host_key_file: /var/lib/runbookos/.ssh/llama_tunnel_known_hosts
+    observed_pinned_host_key_fingerprint: SHA256:KVifGkqQ1p5iyFOmgzfAQFPNRwI1IpA4D7p5F8RRPfg
+    host_key_independent_verification: PENDING_OPERATOR_TRUSTED_SOURCE
+    proposed_forward: 127.0.0.1:8080_to_127.0.0.1:8080
+network:
+  tunnel_handshake_performed: false
+  route_change_authorized: false
+  firewall_change_authorized: false
+  potential_runtime_rule_if_path_is_blocked:
+    source: 10.60.10.10/32
+    destination: 192.168.100.145/32
+    protocol: tcp
+    port: 22
+    disposition: requires_separate_explicit_approval; do_not_apply_or_expand
+test:
+  scenarios:
+    - nginx-unavailable
+    - fastapi-service-failure
+    - postgresql-protocol-failure
+    - network-connectivity-failure
+    - insufficient-evidence
+    - adversarial-pre-provider-guard
+  maximum_provider_requests: 10
+  maximum_sequential_requests_per_case: 2
+  maximum_request_timeout_seconds: 120
+  retries: 0
+  serial_execution: true
+  model_cases: 5
+  adversarial_provider_requests_expected: 0
+  resource_guardrails:
+    historical_host_ram_gib: 30
+    historical_peak_model_rss_gib: 8.16
+    require_memavailable_before_start_gib: 16
+    stop_if_acceptance_server_rss_exceeds_gib: 10
+    stop_if_host_memavailable_below_gib: 6
+    hard_memory_limit_enforced: false
+    cpu_threads: 4
+    context_tokens: 12288
+    concurrent_model_slots: 1
+  invalid_json_unsupported_id_forged_citation: offline_mock_tests_only
+  executor: test_only_synthetic_read_only_executor
+  target: synthetic-acceptance.invalid
+  permitted_action_ids: [systemd.is_active, postgresql.protocol_available, network.routes]
+  mutable_actions: []
+  production_cli_investigate: prohibited
+  expected_evidence: synthetic_fake_executor_results_only
+acceptance_files:
+  root: /var/lib/runbookos/acceptance-v060/ai-acceptance/
+  owner: runbookos
+  directory_mode: "0700"
+  file_mode: "0600"
+  proposed_paths:
+    - harness.py
+    - scenarios.json
+    - config/inventory.yml
+    - config/policy.yml
+    - config/ssh_profiles.yml
+    - config/investigation.yml
+    - runbooks/web-health.yml
+    - runbooks/application-health.yml
+    - runbooks/database-health.yml
+    - runbooks/network-health.yml
+    - state/investigation.sqlite3
+    - results/summary.json
+    - secrets/llama-api-key
+  operational_or_historical_databases_modified: false
+credentials:
+  server_api_key_file: /home/morphious/.config/runbookos/llama-api-key
+  server_api_key_value_recorded: false
+  client_secret_path: /var/lib/runbookos/acceptance-v060/ai-acceptance/secrets/llama-api-key
+  delivery: operator_must_provision_same_value_through_approved_secret_channel; no_chat_no_shell_history_no_logs
+  client_secret_currently_present: false
+  environment_variable: RUNBOOKOS_LLAMA_API_KEY
+processes_requested:
+  - host_llama_server_foreground_temporary
+  - ops01_ssh_local_forward_foreground_temporary
+  - ops01_python_harness_foreground_temporary
+listeners_requested:
+  - host: ubuntu-physical-host
+    address: 127.0.0.1
+    port: 8080
+  - host: ops-01
+    address: 127.0.0.1
+    port: 8080
+database_and_audit:
+  database: /var/lib/runbookos/acceptance-v060/ai-acceptance/state/investigation.sqlite3
+  expected_writes: synthetic execution rows/step evidence for selected diagnostics, investigation rows for five ordinary cases, and corresponding audit events
+  adversarial_case: deterministic pre-provider rejection; no investigation row expected
+  existing_ssh_acceptance_database: read_only_and_preserved
+cleanup:
+  stop_only_acceptance_owned_processes: true
+  remove_temporary_tunnel_and_runtime_firewall_rule_if_separately_authorized: true
+  preserve_acceptance_database_and_results_for_review: true
+  restore_prior_listener_state: true
+stop_conditions:
+  - independent_host_key_evidence_missing_or_mismatched
+  - tunnel_key_or_account_identity_mismatch
+  - llama_server_not_loopback_only
+  - api_authentication_failure
+  - unexpected_route_or_firewall_change_required
+  - ssh_adapter_construction_or_real_transport_attempt
+  - action_outside_declared_read_only_allowlist
+  - provider_timeout_invalid_output_or_forged_citation
+  - unexpected_existing_database_or_file_collision
+  - unexpected_process_or_listener

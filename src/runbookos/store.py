@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import time
 import uuid
@@ -564,6 +565,158 @@ class SQLiteStore:
             and payload.get("plan_hash") == plan_hash
             for row in rows
         )
+
+    def record_remediation_proposal(
+        self,
+        *,
+        incident_id: str,
+        investigation_id: str,
+        proposal: dict[str, Any],
+        decision: str,
+        reason_code: str,
+    ) -> str:
+        """Append an advisory proposal to the audit chain after linkage checks.
+
+        This does not create a plan, approval, or execution. The proposal is
+        stored as an audit event so historical investigation hashes remain
+        unchanged.
+        """
+        if decision not in {"accepted", "rejected", "abstained"}:
+            raise ConfigurationError("invalid remediation proposal decision")
+        if not re.fullmatch(r"[a-z0-9_]{1,80}", reason_code):
+            raise ConfigurationError("invalid remediation proposal reason code")
+        if decision in {"accepted", "abstained"}:
+            from .remediation_proposal import RemediationProposalReplyV1
+
+            try:
+                model_fields = set(RemediationProposalReplyV1.model_fields)
+                metadata_fields = {
+                    "validation",
+                    "provider",
+                    "model",
+                    "duration_seconds",
+                    "token_usage",
+                }
+                if set(proposal) - model_fields - metadata_fields:
+                    raise ValueError("unexpected persisted proposal field")
+                reply = RemediationProposalReplyV1.model_validate(
+                    {key: value for key, value in proposal.items() if key in model_fields}
+                )
+            except Exception as exc:
+                raise ConfigurationError("invalid persisted remediation proposal") from exc
+            if (
+                reply.incident_id != incident_id
+                or reply.investigation_id != investigation_id
+                or (decision == "abstained") != reply.abstain
+            ):
+                raise ConfigurationError("proposal identity or decision mismatch")
+            clean = reply.model_dump(mode="json")
+            validation = proposal.get("validation")
+            if not isinstance(validation, dict) or validation.get("accepted") is not True:
+                raise ConfigurationError("proposal validation result is missing")
+            if validation.get("abstained") is not reply.abstain:
+                raise ConfigurationError("proposal validation decision mismatch")
+            candidate = validation.get("candidate")
+            if reply.abstain:
+                if candidate is not None:
+                    raise ConfigurationError("abstention cannot persist an action candidate")
+            elif (
+                not isinstance(candidate, dict)
+                or candidate.get("action_id") != reply.candidate_action_id
+                or candidate.get("target_ref") != reply.target_ref
+            ):
+                raise ConfigurationError("persisted action differs from model proposal")
+            else:
+                from .actions import validate_action
+
+                try:
+                    action = validate_action(
+                        str(candidate.get("action_id")), candidate.get("arguments", {})
+                    )
+                except Exception as exc:
+                    raise ConfigurationError("persisted proposal action is not registered") from exc
+                if action.read_only:
+                    raise ConfigurationError("persisted proposal action is not a remediation")
+            clean = {
+                **clean,
+                "validation": {
+                    "accepted": True,
+                    "abstained": reply.abstain,
+                    "candidate": redact(candidate),
+                },
+            }
+            provider = proposal.get("provider")
+            model = proposal.get("model")
+            if isinstance(provider, str) and len(provider) <= 64:
+                clean["provider"] = provider
+            if isinstance(model, str) and len(model) <= 128:
+                clean["model"] = model
+            duration = proposal.get("duration_seconds")
+            if isinstance(duration, (int, float)) and not isinstance(duration, bool):
+                clean["duration_seconds"] = duration
+            usage = proposal.get("token_usage")
+            if isinstance(usage, dict) and all(
+                key in {"prompt_tokens", "completion_tokens", "total_tokens"}
+                and isinstance(value, int)
+                and not isinstance(value, bool)
+                for key, value in usage.items()
+            ):
+                clean["token_usage"] = usage
+        else:
+            if proposal != {"proposal_version": 1, "outcome": "unavailable"}:
+                raise ConfigurationError("rejected proposals may store only a sanitized outcome")
+            clean = proposal
+        proposal_hash = hashlib.sha256(canonical_json(clean).encode("utf-8")).hexdigest()
+        with self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            linked = db.execute(
+                "SELECT 1 FROM incident_investigations WHERE incident_id=? AND investigation_id=?",
+                (incident_id, investigation_id),
+            ).fetchone()
+            if linked is None:
+                db.rollback()
+                raise ConfigurationError("proposal incident/investigation linkage mismatch")
+            self._audit(
+                db,
+                "remediation.proposal_recorded",
+                {
+                    "incident_id": incident_id,
+                    "investigation_id": investigation_id,
+                    "decision": decision,
+                    "reason_code": reason_code,
+                    "proposal_sha256": proposal_hash,
+                    "proposal": clean,
+                },
+            )
+            db.commit()
+        return proposal_hash
+
+    def remediation_proposals(self, incident_id: str) -> list[dict[str, Any]]:
+        """Read proposals attached to an incident from the hash-chained audit."""
+        result: list[dict[str, Any]] = []
+        with self._connection() as db:
+            rows = db.execute(
+                "SELECT sequence,payload_json FROM audit_events "
+                "WHERE kind='remediation.proposal_recorded' ORDER BY sequence"
+            ).fetchall()
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"])
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(payload, dict) and payload.get("incident_id") == incident_id:
+                result.append({"sequence": row["sequence"], **payload})
+        return result
+
+    def investigation_is_linked(self, incident_id: str, investigation_id: str) -> bool:
+        with self._connection() as db:
+            return (
+                db.execute(
+                    "SELECT 1 FROM incident_investigations WHERE incident_id=? AND investigation_id=?",
+                    (incident_id, investigation_id),
+                ).fetchone()
+                is not None
+            )
 
     def create_investigation(
         self, result: dict[str, Any], *, investigation_id: str | None = None

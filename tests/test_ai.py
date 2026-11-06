@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -18,7 +19,9 @@ from runbookos.ai import (
     ModelReply,
     OpenAICompatibleProvider,
     ProviderConfig,
+    _decode_minimal_assessment_reply,
     _decode_model_json,
+    _safe_assessment_failure_code,
     load_investigation_config,
 )
 from runbookos.cli import app
@@ -39,6 +42,47 @@ class SequenceProvider:
         if callable(response):
             response = response(self.calls)
         return ModelReply(json.dumps(response), "mock-qwen", 0.01)
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (RunbookOSError("AI assessment response is not complete JSON"), "malformed_json"),
+        (
+            RunbookOSError("AI assessment response failed the Minimal Semantic Reply v2 contract"),
+            "reply_schema_invalid",
+        ),
+        (RunbookOSError("AI provider request timed out"), "provider_timeout"),
+        (
+            RunbookOSError("AI referenced evidence that was not produced by this investigation"),
+            "forged_evidence_reference",
+        ),
+        (
+            RunbookOSError("private response content should not be recorded"),
+            "provider_or_contract_error",
+        ),
+    ],
+)
+def test_assessment_failure_labels_are_sanitized(error, expected):
+    assert _safe_assessment_failure_code(error) == expected
+
+
+def test_minimal_assessment_schema_failure_keeps_only_safe_validator_location():
+    raw = json.dumps(
+        {
+            "reply_version": 2,
+            "category": "private-model-text",
+            "confidence": 0.5,
+            "evidence_ids": [],
+            "reason": "raw response must not appear",
+            "abstain": True,
+            "overall_uncertainty": 0.5,
+        }
+    )
+    with pytest.raises(RunbookOSError) as error:
+        _decode_minimal_assessment_reply(raw)
+    assert "category:literal" in str(error.value)
+    assert "private-model-text" not in str(error.value)
 
 
 def make_config(runbook_path: Path, **limits) -> tuple[InvestigationConfig, Path]:
@@ -80,8 +124,9 @@ def fake_ssh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, response: dict) ->
     return executable
 
 
+@pytest.mark.parametrize("constrained", [False, True])
 def test_investigation_runs_only_catalog_readonly_diagnostics_and_stores_refs(
-    tmp_path: Path, key_material, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, key_material, monkeypatch: pytest.MonkeyPatch, constrained: bool
 ) -> None:
     paths = write_config_tree(tmp_path)
     fake_ssh(
@@ -92,24 +137,37 @@ def test_investigation_runs_only_catalog_readonly_diagnostics_and_stores_refs(
     config, config_dir = make_config(paths.inventory.parent.parent / "runbook.yml")
 
     def analysis(calls):
-        refs = json.loads(calls[-1][1])["valid_evidence_refs"]
+        refs = json.loads(calls[-1][1])["evidence_refs"]
         return {
-            "hypotheses": [
-                {
-                    "statement": "The test service is active.",
-                    "confidence": 0.92,
-                    "evidence_refs": refs,
-                }
-            ],
-            "recommended_next_steps": ["Continue monitoring the service health check."],
+            "reply_version": 2,
+            "category": "healthy",
+            "confidence": 0.92,
+            "evidence_ids": refs,
+            "reason": "The test service is active.",
+            "abstain": False,
+            "overall_uncertainty": 0.08,
         }
 
     provider = SequenceProvider([{"diagnostic_ids": ["web_health"]}, analysis])
+    config.provider.schema_constrained_replies = constrained
+    schemas = []
+
+    def constrained_reply(system, user, max_tokens, temperature, schema):
+        schemas.append(schema)
+        return provider.complete(system, user, max_tokens, temperature)
+
+    monkeypatch.setattr(provider, "complete_with_schema", constrained_reply, raising=False)
     result = IncidentInvestigator(paths, config, config_dir, provider).investigate(
         "Users report intermittent web errors.", incident_id="incident-synthetic"
     )
 
     assert result["status"] == "succeeded"
+    assert len(schemas) == (2 if constrained else 0)
+    if constrained:
+        assert schemas[0]["properties"]["diagnostic_ids"]["items"] == {"enum": ["web_health"]}
+        assert schemas[1]["anyOf"][0]["properties"]["abstain"] == {"const": True}
+        assert schemas[1]["anyOf"][0]["properties"]["category"] == {"enum": ["unknown"]}
+        assert schemas[1]["anyOf"][1]["properties"]["evidence_ids"]["items"] == {"enum": ["R01"]}
     assert result["tool_calls"] == 1
     assert len(result["verified_evidence"]) == 1
     assert result["verified_evidence"][0]["action"] == "systemd.is_active"
@@ -119,7 +177,7 @@ def test_investigation_runs_only_catalog_readonly_diagnostics_and_stores_refs(
     assert cited_refs <= actual_refs
     assert all(":" in ref for ref in cited_refs)
     model_payload = json.loads(provider.calls[1][1])
-    assert model_payload["valid_evidence_refs"] == ["R01"]
+    assert model_payload["evidence_refs"] == ["R01"]
     assert model_payload["evidence_untrusted"][0]["ref"] == "R01"
     assert "execution_id" not in model_payload["evidence_untrusted"][0]
     assert result["report"]["recommendations_are_executable"] is False
@@ -127,7 +185,8 @@ def test_investigation_runs_only_catalog_readonly_diagnostics_and_stores_refs(
     assert assessment["schema_version"] == 1
     assert assessment["incident_id"] == "incident-synthetic"
     assert assessment["investigation_id"] == result["investigation_id"]
-    assert assessment["assessment_status"] == "partial"  # Legacy v0.6 reply has no classes.
+    assert assessment["assessment_status"] == "assessed"
+    assert assessment["classifications"][0]["status"] == "suspected"
     assert assessment["observations"][0]["verification_status"] == "verified"
     assert assessment["semantic_support_status"] == "unverified"
     selection_prompt = provider.calls[0][0]
@@ -157,28 +216,13 @@ def test_structured_assessment_references_are_restored_and_persisted(
         [
             {"diagnostic_ids": ["web_health"]},
             lambda calls: {
-                "inferences": [
-                    {"statement": "The registered check returned active.", "evidence_refs": ["R01"]}
-                ],
-                "hypotheses": [
-                    {
-                        "statement": "The service is currently active.",
-                        "confidence": 0.9,
-                        "evidence_refs": ["R01"],
-                    }
-                ],
-                "classifications": [
-                    {
-                        "category": "healthy",
-                        "confidence": 0.9,
-                        "supporting_evidence_refs": ["R01"],
-                        "status": "supported",
-                    }
-                ],
-                "unknowns": [],
-                "recommended_next_steps": ["An operator may review the service evidence."],
+                "reply_version": 2,
+                "category": "healthy",
+                "confidence": 0.9,
+                "evidence_ids": json.loads(calls[-1][1])["evidence_refs"],
+                "reason": "The registered check returned active.",
+                "abstain": False,
                 "overall_uncertainty": 0.1,
-                "assessment_status": "assessed",
             },
         ]
     )
@@ -187,9 +231,10 @@ def test_structured_assessment_references_are_restored_and_persisted(
     )
     assessment = result["assessment"]
     canonical_ref = result["evidence"][0]["ref"]
-    assert assessment["inferences"][0]["evidence_refs"] == [canonical_ref]
+    assert assessment["inferences"] == []
+    assert assessment["hypotheses"][0]["evidence_refs"] == [canonical_ref]
     assert assessment["classifications"][0]["supporting_evidence_refs"] == [canonical_ref]
-    assert assessment["classifications"][0]["status"] == "supported"
+    assert assessment["classifications"][0]["status"] == "suspected"
     assert assessment["semantic_support_status"] == "unverified"
     stored = SQLiteStore(paths.database).investigations()[0]["result"]["assessment"]
     assert stored == assessment
@@ -242,7 +287,14 @@ def test_prompt_injection_and_unknown_tool_selection_fail_closed(
     investigator = IncidentInvestigator(paths, config, config_dir, provider)
     with pytest.raises(PolicyDenied, match="unregistered diagnostic"):
         investigator.investigate("Check the service status")
-    assert len(SQLiteStore(paths.database).history()) == 0
+    store = SQLiteStore(paths.database)
+    investigations = store.investigations()
+    assert len(investigations) == 1
+    assert investigations[0]["result"]["status"] == "failed"
+    assert investigations[0]["result"]["assessment_failure"]["reason_category"] == (
+        "unsupported_diagnostic_id"
+    )
+    assert store.verify_audit_chain()[0]
 
 
 def test_model_cannot_cite_unobserved_evidence(
@@ -259,19 +311,26 @@ def test_model_cannot_cite_unobserved_evidence(
         [
             {"diagnostic_ids": ["web_health"]},
             {
-                "hypotheses": [
-                    {
-                        "statement": "Invented result",
-                        "confidence": 0.9,
-                        "evidence_refs": ["fake:step"],
-                    }
-                ],
-                "recommended_next_steps": [],
+                "reply_version": 2,
+                "category": "service_failure",
+                "confidence": 0.9,
+                "evidence_ids": ["fake:step"],
+                "reason": "Invented result",
+                "abstain": False,
+                "overall_uncertainty": 0.1,
             },
         ]
     )
     with pytest.raises(PolicyDenied, match="not produced"):
         IncidentInvestigator(paths, config, config_dir, provider).investigate("Service issue")
+    store = SQLiteStore(paths.database)
+    saved = store.investigations()[0]["result"]
+    assert saved["status"] == "failed"
+    assert saved["assessment_failure"]["reason_category"] == "forged_evidence_reference"
+    assert saved["evidence"]
+    assert "fake:step" not in json.dumps(saved)
+    assert "Invented result" not in json.dumps(saved)
+    assert store.verify_audit_chain()[0]
 
 
 def test_investigator_refuses_policy_allowed_remediation_without_approval(
@@ -303,14 +362,13 @@ def test_cli_investigate_and_history_use_provider_and_omit_incident_text(
         [
             {"diagnostic_ids": ["web_health"]},
             lambda calls: {
-                "hypotheses": [
-                    {
-                        "statement": "Service is active.",
-                        "confidence": 0.9,
-                        "evidence_refs": json.loads(calls[-1][1])["valid_evidence_refs"],
-                    }
-                ],
-                "recommended_next_steps": [],
+                "reply_version": 2,
+                "category": "healthy",
+                "confidence": 0.9,
+                "evidence_ids": json.loads(calls[-1][1])["evidence_refs"],
+                "reason": "Service is active.",
+                "abstain": False,
+                "overall_uncertainty": 0.1,
             },
         ]
     )
@@ -382,7 +440,6 @@ def test_http_provider_parses_openai_compatible_response_and_uses_api_key(
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
-
     assert reply.content == '{"diagnostic_ids":[]}'
     assert reply.model == "configured-model"
     assert reply.token_usage == {"prompt_tokens": 11, "completion_tokens": 3, "total_tokens": 14}
@@ -455,9 +512,27 @@ def test_http_provider_maps_timeout_without_leaking_request_data(monkeypatch: py
             raise TimeoutError("simulated provider timeout")
 
     monkeypatch.setattr("runbookos.ai.urllib.request.build_opener", lambda *_: TimeoutOpener())
-    with pytest.raises(RunbookOSError, match="request failed: TimeoutError") as error:
+    with pytest.raises(RunbookOSError, match="AI provider request timed out") as error:
         OpenAICompatibleProvider(config).complete("system", "sensitive user", 64, 0)
     assert "sensitive user" not in str(error.value)
+
+
+def test_http_provider_recognizes_url_error_timeout_without_leaking_data(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    config = ProviderConfig(
+        base_url="http://127.0.0.1:8080/v1", model="slow-local", timeout_seconds=1
+    )
+
+    class TimeoutOpener:
+        def open(self, request, timeout):
+            raise urllib.error.URLError(TimeoutError("private timeout detail"))
+
+    monkeypatch.setattr("runbookos.ai.urllib.request.build_opener", lambda *_: TimeoutOpener())
+    with pytest.raises(RunbookOSError, match="AI provider request timed out") as error:
+        OpenAICompatibleProvider(config).complete("system", "sensitive user", 64, 0)
+    assert "sensitive user" not in str(error.value)
+    assert "private timeout detail" not in str(error.value)
 
 
 def test_json_parser_only_repairs_missing_trailing_delimiters():
@@ -496,3 +571,73 @@ def test_investigation_config_rejects_duplicate_yaml_keys(tmp_path: Path):
     )
     with pytest.raises(ConfigurationError, match="duplicate YAML key"):
         load_investigation_config(path)
+
+
+@pytest.mark.parametrize(
+    "field", ["category", "confidence", "evidence_ids", "reason", "abstain", "overall_uncertainty"]
+)
+def test_assessment_failure_schema_metadata_is_bounded_to_known_fields(field):
+    from runbookos.ai import _safe_assessment_schema_details
+    from runbookos.errors import RunbookOSError
+
+    assert _safe_assessment_schema_details(
+        RunbookOSError(f"AI assessment reply schema invalid at {field}:invalid_type")
+    ) == {"validator_location": field, "validator_error": "invalid_type"}
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "private model reply content",
+        "AI assessment reply schema invalid at private_data:missing",
+        "AI assessment reply schema invalid at category:literal private data",
+    ],
+)
+def test_assessment_schema_metadata_never_copies_unknown_text(message):
+    from runbookos.ai import _safe_assessment_schema_details
+    from runbookos.errors import RunbookOSError
+
+    assert _safe_assessment_schema_details(RunbookOSError(message)) == {}
+
+
+def test_schema_constrained_request_preserves_auth_timeout_budget_and_no_retry(monkeypatch):
+    import json
+
+    config = ProviderConfig(
+        base_url="http://127.0.0.1:8080/v1",
+        model="local",
+        timeout_seconds=120,
+        api_key_env="TEST_SCHEMA_KEY",
+        schema_constrained_proposals=True,
+    )
+    monkeypatch.setenv("TEST_SCHEMA_KEY", "synthetic-test-key")
+    calls = []
+    schema = {
+        "type": "object",
+        "properties": {"proposal_version": {"const": 2}},
+        "required": ["proposal_version"],
+        "additionalProperties": False,
+    }
+
+    class TimeoutOpener:
+        def open(self, request, timeout):
+            calls.append((request, timeout))
+            raise TimeoutError("synthetic timeout")
+
+    monkeypatch.setattr("runbookos.ai.urllib.request.build_opener", lambda *_: TimeoutOpener())
+    with pytest.raises(RunbookOSError, match="timed out"):
+        OpenAICompatibleProvider(config).complete_with_schema(
+            "system", "synthetic context", 384, 0, schema
+        )
+    assert len(calls) == 1
+    request, timeout = calls[0]
+    body = json.loads(request.data)
+    assert timeout == 120
+    assert body["max_tokens"] == 384 and body["stream"] is False
+    assert body["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {"name": "runbookos_remediation_v2", "strict": True, "schema": schema},
+    }
+    assert body["reasoning_format"] == "deepseek"
+    assert body["chat_template_kwargs"] == {"enable_thinking": False}
+    assert request.headers["Authorization"] == "Bearer synthetic-test-key"

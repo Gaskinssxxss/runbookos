@@ -1,7 +1,9 @@
 include README.md LICENSE pyproject.toml requirements-ci-py312.lock
+include CHANGELOG.md
 recursive-include src *.py
 include scripts/staging-v032.py
 include scripts/demo-v060.py
+include scripts/operator-demo-v070.py
 recursive-include config *.example.yml
 exclude config/*.homelab.example.yml
 recursive-include examples *.yml *.json
@@ -10,6 +12,8 @@ recursive-include tests *.py
 exclude tests/test_probe_approval_manifest.py
 exclude tests/test_live_*.py
 exclude tests/test_ai_local_orchestrator_v060.py
+exclude tests/test_qwen_m3_local_entrypoint.py
+exclude scripts/qwen-m3-benchmark-v070.py
 recursive-include tests/fixtures/ai_acceptance_v060 *.json
 recursive-include tests/fixtures/assessment_m3 *.json *.yml
 include docs/architecture.md
@@ -57,3 +61,10 @@ include docs/v0.7.0-m3-evaluation-report.json
 include docs/v0.7.0-m3-evaluation-report.md
 include docs/v0.7.0-m4-completion.md
 include docs/v0.7.0-m5-release-acceptance.md
+include docs/operator-demo-v0.7.0.md
+include docs/production-readiness-review.md
+
+# Approval records and environment-bound authorization state are not release artifacts.
+exclude docs/approval-manifest-v0.3.2.yml
+exclude docs/dashboard-staging-approval-v0.4.0.yml
+exclude docs/disposable-remediation-approval-v0.5.0.yml

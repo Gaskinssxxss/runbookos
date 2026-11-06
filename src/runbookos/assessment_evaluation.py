@@ -373,7 +373,8 @@ def evaluate(dataset: EvaluationDataset, submission: EvaluationInput | None) -> 
             raise ValueError("semantic adjudication supplied without a model assessment")
 
         predicted_class, abstained, confidence = _prediction_class(assessment)
-        if prediction and case.gold.classification is not None:
+        assessment_available = prediction is not None and assessment is not None
+        if assessment_available and case.gold.classification is not None:
             scored_classes.append(
                 (case.gold.classification, predicted_class, abstained, confidence)
             )
@@ -386,18 +387,19 @@ def evaluate(dataset: EvaluationDataset, submission: EvaluationInput | None) -> 
                 "diagnostic_exact_match": predicted_ids == expected_ids if prediction else None,
                 "predicted_diagnostic_ids": sorted(predicted_ids) if prediction else None,
                 "invalid_diagnostic_ids": sorted(invalid_ids),
-                "classification_scored": case.gold.classification is not None,
+                "classification_scored": assessment_available
+                and case.gold.classification is not None,
                 "expected_classification": case.gold.classification,
-                "predicted_classification": predicted_class,
+                "predicted_classification": predicted_class if assessment_available else None,
                 "classification_correct": (
                     predicted_class == case.gold.classification
-                    if prediction and case.gold.classification is not None
+                    if assessment_available and case.gold.classification is not None
                     else None
                 ),
                 "expected_abstention": case.gold.expected_abstention,
-                "predicted_abstention": abstained if prediction else None,
+                "predicted_abstention": abstained if assessment_available else None,
                 "abstention_correct": (
-                    abstained == case.gold.expected_abstention if prediction else None
+                    abstained == case.gold.expected_abstention if assessment_available else None
                 ),
             }
         )
@@ -446,7 +448,11 @@ def evaluate(dataset: EvaluationDataset, submission: EvaluationInput | None) -> 
         if f is not None:
             f1_values.append(f)
 
-    evaluated_cases = [case for case in dataset.cases if case.case_id in by_case]
+    evaluated_cases = [
+        case
+        for case in dataset.cases
+        if case.case_id in by_case and by_case[case.case_id].assessment is not None
+    ]
     abstention_truth = [case.gold.expected_abstention for case in evaluated_cases]
     predicted_abstentions = [
         _prediction_class(by_case[case.case_id].assessment)[1] for case in evaluated_cases
@@ -521,6 +527,7 @@ def evaluate(dataset: EvaluationDataset, submission: EvaluationInput | None) -> 
             if predicted_count == 0
             else "COMPLETE"
             if predicted_count == len(dataset.cases)
+            and all(by_case[case.case_id].assessment is not None for case in dataset.cases)
             else "PARTIAL"
         ),
         "case_counts_by_category": dict(sorted(categories.items())),
@@ -534,6 +541,8 @@ def evaluate(dataset: EvaluationDataset, submission: EvaluationInput | None) -> 
             ),
             "abstention_labeled": len(dataset.cases),
             "evaluated_cases": predicted_count,
+            "assessment_cases": len(evaluated_cases),
+            "assessment_missing_count": predicted_count - len(evaluated_cases),
             "evaluated_classification_labeled": sum(
                 case.gold.classification is not None for case in evaluated_cases
             ),
@@ -589,7 +598,7 @@ def evaluate(dataset: EvaluationDataset, submission: EvaluationInput | None) -> 
             "precision": abstain_precision if submission else None,
             "recall": abstain_recall if submission else None,
             "false_abstention_rate": false_abstention_rate if submission else None,
-            "missed_abstention_count": missed_abstention if predicted_count else None,
+            "missed_abstention_count": missed_abstention if evaluated_cases else None,
             "selective_accuracy": selective_accuracy if submission else None,
             "expected_abstention_cases": sum(abstention_truth),
             "predicted_abstention_cases": sum(predicted_abstentions) if submission else 0,
