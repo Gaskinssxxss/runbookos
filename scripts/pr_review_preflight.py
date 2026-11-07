@@ -165,7 +165,7 @@ def main() -> int:
     if summary:
         with open(summary, "a", encoding="utf-8") as stream:
             stream.write(report)
-    return 1 if result["ci_status"] == "FAIL" else 0
+    return 0 if result["ci_status"] == "PASS" else 1
 
 
 if __name__ == "__main__":
