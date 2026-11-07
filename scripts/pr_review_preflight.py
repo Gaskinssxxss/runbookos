@@ -28,7 +28,7 @@ RISK_PATHS = (
     ".github/workflows/",
     "AGENTS.md",
 )
-CI_PASS = frozenset({"success", "neutral", "skipped"})
+CI_PASS = frozenset({"success"})
 CI_BAD = frozenset({"failure", "timed_out", "cancelled", "action_required", "startup_failure"})
 REPO_PATTERN = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 MAX_OUTPUT = 16000
