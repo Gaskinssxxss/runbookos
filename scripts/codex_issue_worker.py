@@ -10,6 +10,7 @@ import argparse
 import fcntl
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -46,6 +47,7 @@ class Issue:
 class DraftPR:
     url: str
     head: str
+    head_sha: str
     draft: bool
 
 
@@ -94,6 +96,39 @@ def validate_diff(paths: list[str]) -> None:
 def validate_tracked_changes(paths: list[str]) -> None:
     if any(path.startswith(("tests/", "docs/")) for path in paths):
         raise WorkerRejected("existing tests or acceptance documentation changed")
+
+
+def _git(workspace: Path, *args: str) -> bytes:
+    try:
+        return subprocess.run(
+            ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", *args],
+            cwd=workspace,
+            capture_output=True,
+            check=True,
+            timeout=10,
+            env={
+                "PATH": "/usr/bin:/bin",
+                "HOME": str(workspace),
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+            },
+        ).stdout
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        raise WorkerRejected("git verification failed") from exc
+
+
+def _paths(raw: bytes) -> list[str]:
+    return raw.decode("utf-8", "surrogateescape").rstrip("\0").split("\0") if raw else []
+
+
+def _verified_head(workspace: Path, branch: str) -> str:
+    current_branch = _git(workspace, "symbolic-ref", "--quiet", "--short", "HEAD").decode().strip()
+    if current_branch != branch:
+        raise WorkerRejected("sandbox branch does not match issue branch")
+    head = _git(workspace, "rev-parse", "--verify", "HEAD").decode().strip()
+    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", head):
+        raise WorkerRejected("invalid commit SHA")
+    return head
 
 
 def run_bounded(command: list[str], cwd: Path, *, seconds: int = MAX_SECONDS) -> tuple[int, str]:
@@ -172,10 +207,12 @@ def pilot(
     *,
     event: str,
     actor_permission: str,
+    baseline_sha: str,
     workspace: Path,
     sandbox: Callable[[Path, Issue], None],
-    publish: Callable[[str, str], DraftPR],
+    publish: Callable[[str, str, str], DraftPR],
     existing_pr: Callable[[str], str | None],
+    remote_head: Callable[[str], str],
     stop: Callable[[], bool],
 ) -> str:
     """One branch/PR transaction with a caller-supplied isolated sandbox.
@@ -183,6 +220,8 @@ def pilot(
     Publisher credentials stay with the caller, never inside the sandbox.
     """
     authorize(issue, event=event, actor_permission=actor_permission)
+    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", baseline_sha):
+        raise WorkerRejected("trusted baseline SHA required")
     workspace.parent.mkdir(parents=True, exist_ok=True)
     lock_path = workspace.parent / f".codex-worker-issue-{issue.number}.lock"
     with lock_path.open("w") as lock:
@@ -190,15 +229,19 @@ def pilot(
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise WorkerRejected("issue dispatch already running") from exc
-        return _pilot_locked(issue, workspace, sandbox, publish, existing_pr, stop)
+        return _pilot_locked(
+            issue, baseline_sha, workspace, sandbox, publish, existing_pr, remote_head, stop
+        )
 
 
 def _pilot_locked(
     issue: Issue,
+    baseline_sha: str,
     workspace: Path,
     sandbox: Callable[[Path, Issue], None],
-    publish: Callable[[str, str], DraftPR],
+    publish: Callable[[str, str, str], DraftPR],
     existing_pr: Callable[[str], str | None],
+    remote_head: Callable[[str], str],
     stop: Callable[[], bool],
 ) -> str:
     branch = branch_for(issue.number)
@@ -213,35 +256,45 @@ def _pilot_locked(
     sandbox(workspace, issue)
     if stop() or time.monotonic() - started > MAX_SECONDS:
         raise WorkerRejected("stopped or runtime limit exceeded")
-    changed_raw = subprocess.run(
-        ["git", "diff", "--name-only", "-z", "HEAD"],
-        cwd=workspace,
-        capture_output=True,
-        check=True,
-    ).stdout
-    untracked_raw = subprocess.run(
-        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
-        cwd=workspace,
-        capture_output=True,
-        check=True,
-    ).stdout
-    changed = (
-        changed_raw.decode("utf-8", "surrogateescape").rstrip("\0").split("\0")
-        if changed_raw
-        else []
+    head = _verified_head(workspace, branch)
+    _git(workspace, "cat-file", "-e", f"{baseline_sha}^{{commit}}")
+    _git(workspace, "merge-base", "--is-ancestor", baseline_sha, head)
+    # The pinned baseline captures committed, staged, and unstaged changes.
+    changed = _paths(_git(workspace, "diff", "--name-only", "--no-ext-diff", "-z", baseline_sha))
+    untracked = _paths(_git(workspace, "ls-files", "--others", "--exclude-standard", "-z"))
+    history = _paths(
+        _git(
+            workspace,
+            "log",
+            "--format=",
+            "--name-only",
+            "--no-renames",
+            "-z",
+            f"{baseline_sha}..{head}",
+        )
     )
-    untracked = (
-        untracked_raw.decode("utf-8", "surrogateescape").rstrip("\0").split("\0")
-        if untracked_raw
-        else []
-    )
-    validate_tracked_changes(changed)
-    validate_diff(changed + untracked)
+    history = [path for path in history if path]
+    validate_tracked_changes(changed + history)
+    validate_diff(changed + untracked + history)
+    if _git(workspace, "status", "--porcelain=v1", "-z"):
+        raise WorkerRejected("uncommitted or untracked changes cannot be published")
     if existing_pr(branch):
         raise WorkerRejected("PR appeared during run")
-    pr = publish(branch, f"Closes #{issue.number}")
-    if pr.head != branch or not pr.draft:
-        raise WorkerRejected("publisher did not confirm issue branch and draft PR")
+    if (
+        stop()
+        or _verified_head(workspace, branch) != head
+        or _git(workspace, "status", "--porcelain=v1", "-z")
+    ):
+        raise WorkerRejected("checkout changed after validation or manual stop requested")
+    pr = publish(branch, head, f"Closes #{issue.number}")
+    if (
+        pr.head != branch
+        or pr.head_sha != head
+        or remote_head(branch) != head
+        or _verified_head(workspace, branch) != head
+        or not pr.draft
+    ):
+        raise WorkerRejected("publisher did not confirm exact verified commit and draft PR")
     return pr.url
 
 
