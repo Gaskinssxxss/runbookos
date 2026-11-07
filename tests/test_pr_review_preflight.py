@@ -106,3 +106,20 @@ def test_incomplete_files_rejected():
 def test_invalid_repo_rejected(repo):
     with pytest.raises(ValueError):
         MODULE.collect(repo, 1, "test-token")
+
+
+@pytest.mark.parametrize(
+    ("ci_status", "expected_exit"),
+    [("PASS", 0), ("FAIL", 1), ("UNKNOWN", 1), ("PENDING_OR_UNKNOWN", 1)],
+)
+def test_main_fails_closed_on_missing_ci_evidence(ci_status, expected_exit, monkeypatch, capsys):
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    monkeypatch.setattr("sys.argv", ["pr_review_preflight", "--repo", "Gaskinssxxss/runbookos", "--pr", "4"])
+    with (
+        patch.object(MODULE, "collect", return_value=payload()),
+        patch.object(MODULE, "review", return_value={"ci_status": ci_status, "checks_count": 0, "files_count": 0, "findings": []}),
+    ):
+        result = MODULE.main()
+    assert result == expected_exit
+    assert ci_status in capsys.readouterr().out
