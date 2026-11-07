@@ -260,12 +260,19 @@ def _logical_assertions(path: Path) -> dict[str, object]:
     """Return content identity and row counts without returning database rows."""
     digest = hashlib.sha256()
     row_counts: dict[str, int] = {}
+    tables = ("audit_events", *_DATA_TABLES, "sqlite_sequence")
     try:
         with closing(sqlite3.connect(_uri(path, immutable=True), uri=True)) as db:
-            for table in ("audit_events", *_DATA_TABLES):
+            present = {
+                row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+            if not set(tables).issubset(present):
+                raise BackupError("schema_mismatch")
+            for table in tables:
                 count = 0
                 digest.update(table.encode("ascii") + b"\0")
-                for row in db.execute(f'SELECT * FROM "{table}" ORDER BY rowid'):
+                ordering = "name, seq" if table == "sqlite_sequence" else "rowid"
+                for row in db.execute(f'SELECT * FROM "{table}" ORDER BY {ordering}'):
                     normalized = [
                         value.hex() if isinstance(value, bytes) else value for value in row
                     ]

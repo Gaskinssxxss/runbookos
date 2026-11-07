@@ -78,6 +78,29 @@ def populated_source(tmp_path: Path) -> tuple[Path, str]:
     return source, incident_id
 
 
+def seed_deleted_step_result(source: Path) -> None:
+    """Leave application rows unchanged while advancing AUTOINCREMENT state."""
+    with closing(sqlite3.connect(source)) as db:
+        cursor = db.execute(
+            """INSERT INTO step_results
+               (execution_id,target,phase,step_id,action,status,started_at,finished_at,evidence_json)
+               VALUES(?,?,?,?,?,?,?,?,?)""",
+            (
+                "running-execution",
+                "fixture",
+                "diagnostic",
+                "temporary",
+                "fixture.check",
+                "succeeded",
+                "now",
+                "now",
+                "{}",
+            ),
+        )
+        db.execute("DELETE FROM step_results WHERE id=?", (cursor.lastrowid,))
+        db.commit()
+
+
 def test_wal_active_backup_preserves_incident_links_and_audit(tmp_path: Path) -> None:
     source, incident_id = populated_source(tmp_path)
     backup = source.parent / "snapshot.sqlite3"
@@ -221,6 +244,69 @@ def test_rehearsal_accepts_empty_audit_state(tmp_path: Path) -> None:
     assert result["status"] == "PASS"
     assert result["audit_events"] == 0
     assert result["review"]["approvals"]["unused"] == 0
+
+
+def test_logical_assertions_include_sqlite_sequence_counters(tmp_path: Path) -> None:
+    source, _ = populated_source(tmp_path)
+    seed_deleted_step_result(source)
+    backup = source.parent / "sequence-backup.sqlite3"
+    copy = source.parent / "sequence-copy.sqlite3"
+    assert state_backup.create_backup(source, backup)["status"] == "PASS"
+    state_backup._copy(backup, copy, immutable_source=True)
+
+    with closing(sqlite3.connect(copy)) as db:
+        db.execute("UPDATE sqlite_sequence SET seq=seq+100 WHERE name='step_results'")
+        db.commit()
+    with closing(sqlite3.connect(state_backup._uri(backup, immutable=True), uri=True)) as original:
+        with closing(sqlite3.connect(state_backup._uri(copy, immutable=True), uri=True)) as changed:
+            assert (
+                original.execute("SELECT * FROM step_results").fetchall()
+                == changed.execute("SELECT * FROM step_results").fetchall()
+            )
+            assert (
+                original.execute(
+                    "SELECT name,seq FROM sqlite_sequence WHERE name='step_results'"
+                ).fetchone()
+                != changed.execute(
+                    "SELECT name,seq FROM sqlite_sequence WHERE name='step_results'"
+                ).fetchone()
+            )
+
+    original_assertions = state_backup._logical_assertions(backup)
+    changed_assertions = state_backup._logical_assertions(copy)
+    assert (
+        original_assertions["row_counts"]["step_results"]
+        == changed_assertions["row_counts"]["step_results"]
+    )
+    assert original_assertions["row_counts"]["sqlite_sequence"] == 1
+    assert original_assertions["logical_sha256"] != changed_assertions["logical_sha256"]
+
+
+def test_rehearsal_rejects_staging_autoincrement_counter_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, _ = populated_source(tmp_path)
+    seed_deleted_step_result(source)
+    backup = source.parent / "sequence-backup.sqlite3"
+    staging = source.parent / "sequence-staging.sqlite3"
+    assert state_backup.create_backup(source, backup)["status"] == "PASS"
+    original_copy = state_backup._copy
+
+    def copy_with_counter_drift(
+        source_path: Path, temporary: Path, *, immutable_source: bool = False
+    ) -> None:
+        original_copy(source_path, temporary, immutable_source=immutable_source)
+        with closing(sqlite3.connect(temporary)) as db:
+            db.execute("UPDATE sqlite_sequence SET seq=seq+100 WHERE name='step_results'")
+            db.commit()
+
+    monkeypatch.setattr(state_backup, "_copy", copy_with_counter_drift)
+    assert state_backup.rehearse_restore(backup, staging) == {
+        "status": "FAIL",
+        "reason_code": "staging_mismatch",
+    }
+    assert not staging.exists()
+    assert not list(source.parent.glob(".sequence-staging.sqlite3.rehearsal-*"))
 
 
 def test_rehearsal_rejects_unrecognized_schema_at_version_four(tmp_path: Path) -> None:
