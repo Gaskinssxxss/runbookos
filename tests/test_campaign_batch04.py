@@ -178,6 +178,20 @@ def test_resource_or_identity_failure_aborts_campaign(outcome):
         live.enforce_transport_guard(outcome)
 
 
+def test_proposal_timeout_metadata_is_allowlisted_and_bounded():
+    live = load("campaign_batch04_live")
+    assert live.safe_provider_request_metadata(
+        {"request_metadata": {"failure_stage": "proposal", "duration_seconds": 120.125}}
+    ) == {"failure_stage": "proposal", "duration_seconds": 120.125}
+    for metadata in (
+        {"failure_stage": "assessment", "duration_seconds": 120.0},
+        {"failure_stage": "proposal", "duration_seconds": float("inf")},
+        {"failure_stage": "proposal", "duration_seconds": 10.0, "raw_response": "must not persist"},
+        {"failure_stage": "proposal", "duration_seconds": 3600.1},
+    ):
+        assert live.safe_provider_request_metadata({"request_metadata": metadata}) is None
+
+
 def test_missing_provider_never_injects_another_fault(monkeypatch):
     live = load("campaign_batch04_live")
 

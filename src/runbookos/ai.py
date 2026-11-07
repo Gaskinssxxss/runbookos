@@ -190,6 +190,14 @@ class ModelReply:
     token_usage: dict[str, int] | None = None
 
 
+class ProviderRequestTimeout(RunbookOSError):
+    """Sanitized timeout with client-observed elapsed time, when available."""
+
+    def __init__(self, elapsed_seconds: float) -> None:
+        self.elapsed_seconds = max(0.0, round(float(elapsed_seconds), 3))
+        super().__init__("AI provider request timed out")
+
+
 class MinimalAssessmentReplyV2(BaseModel):
     """Shared provider-facing semantic contract; provenance remains adapter-owned."""
 
@@ -400,12 +408,12 @@ class OpenAICompatibleProvider:
                 token_usage=token_usage or None,
             )
         except TimeoutError:
-            raise RunbookOSError("AI provider request timed out") from None
+            raise ProviderRequestTimeout(time.monotonic() - start) from None
         except urllib.error.HTTPError as exc:
             raise RunbookOSError(f"AI provider returned HTTP {exc.code}") from exc
         except urllib.error.URLError as exc:
             if isinstance(exc.reason, TimeoutError):
-                raise RunbookOSError("AI provider request timed out") from None
+                raise ProviderRequestTimeout(time.monotonic() - start) from None
             raise RunbookOSError("AI provider request failed: URLError") from None
         except OSError as exc:
             raise RunbookOSError(f"AI provider request failed: {type(exc).__name__}") from exc
@@ -987,14 +995,27 @@ class IncidentInvestigator:
                 if isinstance(exc, (TimeoutError, RunbookOSError))
                 else "proposal_unavailable"
             )
+            failure_record: dict[str, Any] = {"proposal_version": 1, "outcome": "unavailable"}
+            if isinstance(exc, ProviderRequestTimeout):
+                failure_record.update(
+                    {
+                        "failure_stage": "proposal",
+                        "duration_seconds": exc.elapsed_seconds,
+                    }
+                )
             engine.store.record_remediation_proposal(
                 incident_id=incident_id,
                 investigation_id=investigation_id,
-                proposal={"proposal_version": 1, "outcome": "unavailable"},
+                proposal=failure_record,
                 decision="rejected",
                 reason_code=reason_code,
             )
-            return {"status": "rejected", "reason_code": reason_code}
+            response: dict[str, Any] = {"status": "rejected", "reason_code": reason_code}
+            if "failure_stage" in failure_record:
+                response["request_metadata"] = {
+                    key: failure_record[key] for key in ("failure_stage", "duration_seconds")
+                }
+            return response
 
     def _persist_failure(
         self,
