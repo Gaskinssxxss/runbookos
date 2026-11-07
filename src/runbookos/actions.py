@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from .errors import ConfigurationError
 
@@ -19,6 +19,60 @@ class JournalTailArguments(BaseModel):
 
     unit: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,127}\.(service|timer)$")
     lines: int = Field(default=20, ge=1, le=50)
+
+
+class UnitStatusArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    unit: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,127}\.service$")
+
+
+class JournalSummaryArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    unit: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,127}\.(service|timer)$")
+    window_minutes: int = Field(default=60, ge=1, le=1440)
+    max_entries: int = Field(default=100, ge=1, le=200)
+
+
+class ProcessListArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    order_by: Literal["pid", "memory_rss"] = "pid"
+    limit: int = Field(default=50, ge=1, le=100)
+
+
+class ProcessIdentityArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    pid: int = Field(ge=1, le=4_194_304)
+
+
+class ProcessTreeArguments(ProcessIdentityArguments):
+    max_depth: int = Field(default=4, ge=1, le=8)
+    max_nodes: int = Field(default=50, ge=1, le=100)
+
+
+class FilesystemPathArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    path: str = Field(min_length=1, max_length=256)
+
+    @field_validator("path")
+    @classmethod
+    def absolute_normal_path(cls, value: str) -> str:
+        if (
+            not value.startswith("/")
+            or any(character in value for character in "\x00\n\r")
+            or ".." in value.split("/")
+        ):
+            raise ValueError("path must be an absolute normalized path")
+        return value
+
+
+class BoundedListArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    limit: int = Field(default=50, ge=1, le=100)
+
+
+class CronSummaryArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    limit: int = Field(default=50, ge=1, le=100)
 
 
 class FixtureConfigRestoreArguments(BaseModel):
@@ -87,13 +141,38 @@ class ActionDefinition:
 
 REGISTRY: dict[str, ActionDefinition] = {
     "systemd.is_active": ActionDefinition("systemd.is_active", True, frozenset({"unit"})),
-    "systemd.failed_units": ActionDefinition("systemd.failed_units", True, frozenset()),
+    "systemd.service_status": ActionDefinition(
+        "systemd.service_status",
+        True,
+        frozenset({"unit"}),
+        arguments_model=UnitStatusArguments,
+        max_timeout_seconds=10,
+    ),
+    "systemd.failed_units": ActionDefinition(
+        "systemd.failed_units", True, frozenset(), max_timeout_seconds=15
+    ),
+    "systemd.timers": ActionDefinition(
+        "systemd.timers",
+        True,
+        frozenset(),
+        frozenset({"limit"}),
+        arguments_model=BoundedListArguments,
+        max_timeout_seconds=10,
+    ),
     "systemd.journal_tail": ActionDefinition(
         "systemd.journal_tail",
         True,
         frozenset({"unit"}),
         frozenset({"lines"}),
         arguments_model=JournalTailArguments,
+        max_timeout_seconds=10,
+    ),
+    "systemd.journal_summary": ActionDefinition(
+        "systemd.journal_summary",
+        True,
+        frozenset({"unit"}),
+        frozenset({"window_minutes", "max_entries"}),
+        arguments_model=JournalSummaryArguments,
         max_timeout_seconds=10,
     ),
     "systemd.restart": ActionDefinition(
@@ -214,8 +293,59 @@ REGISTRY: dict[str, ActionDefinition] = {
         rollback="The shared main cluster is not addressed; a separate plan is required to stop the disposable cluster.",
     ),
     "os.uptime": ActionDefinition("os.uptime", True, frozenset()),
+    "os.cpu": ActionDefinition("os.cpu", True, frozenset(), max_timeout_seconds=3),
+    "os.release": ActionDefinition("os.release", True, frozenset(), max_timeout_seconds=3),
     "os.memory": ActionDefinition("os.memory", True, frozenset()),
     "os.disk": ActionDefinition("os.disk", True, frozenset(), frozenset({"path"})),
+    "os.packages": ActionDefinition(
+        "os.packages",
+        True,
+        frozenset(),
+        frozenset({"limit"}),
+        arguments_model=BoundedListArguments,
+        max_timeout_seconds=10,
+    ),
+    "os.cron": ActionDefinition(
+        "os.cron",
+        True,
+        frozenset(),
+        frozenset({"limit"}),
+        arguments_model=CronSummaryArguments,
+        max_timeout_seconds=5,
+    ),
+    "process.list": ActionDefinition(
+        "process.list",
+        True,
+        frozenset(),
+        frozenset({"order_by", "limit"}),
+        arguments_model=ProcessListArguments,
+        max_timeout_seconds=5,
+    ),
+    "process.inspect": ActionDefinition(
+        "process.inspect",
+        True,
+        frozenset({"pid"}),
+        arguments_model=ProcessIdentityArguments,
+        max_timeout_seconds=3,
+    ),
+    "process.tree": ActionDefinition(
+        "process.tree",
+        True,
+        frozenset({"pid"}),
+        frozenset({"max_depth", "max_nodes"}),
+        arguments_model=ProcessTreeArguments,
+        max_timeout_seconds=5,
+    ),
+    "filesystem.mounts": ActionDefinition(
+        "filesystem.mounts", True, frozenset(), max_timeout_seconds=5
+    ),
+    "filesystem.inodes": ActionDefinition(
+        "filesystem.inodes",
+        True,
+        frozenset({"path"}),
+        arguments_model=FilesystemPathArguments,
+        max_timeout_seconds=3,
+    ),
     "network.interfaces": ActionDefinition("network.interfaces", True, frozenset()),
     "network.routes": ActionDefinition("network.routes", True, frozenset()),
     "network.resolver_config": ActionDefinition("network.resolver_config", True, frozenset()),
