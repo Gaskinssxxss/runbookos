@@ -19,6 +19,7 @@ from runbookos.ai import (
     ModelReply,
     OpenAICompatibleProvider,
     ProviderConfig,
+    ProviderRequestTimeout,
     _decode_minimal_assessment_reply,
     _decode_model_json,
     _safe_assessment_failure_code,
@@ -512,9 +513,12 @@ def test_http_provider_maps_timeout_without_leaking_request_data(monkeypatch: py
             raise TimeoutError("simulated provider timeout")
 
     monkeypatch.setattr("runbookos.ai.urllib.request.build_opener", lambda *_: TimeoutOpener())
-    with pytest.raises(RunbookOSError, match="AI provider request timed out") as error:
+    ticks = iter((10.0, 11.237))
+    monkeypatch.setattr("runbookos.ai.time.monotonic", lambda: next(ticks))
+    with pytest.raises(ProviderRequestTimeout, match="AI provider request timed out") as error:
         OpenAICompatibleProvider(config).complete("system", "sensitive user", 64, 0)
     assert "sensitive user" not in str(error.value)
+    assert error.value.elapsed_seconds == 1.237
 
 
 def test_http_provider_recognizes_url_error_timeout_without_leaking_data(
@@ -529,10 +533,13 @@ def test_http_provider_recognizes_url_error_timeout_without_leaking_data(
             raise urllib.error.URLError(TimeoutError("private timeout detail"))
 
     monkeypatch.setattr("runbookos.ai.urllib.request.build_opener", lambda *_: TimeoutOpener())
-    with pytest.raises(RunbookOSError, match="AI provider request timed out") as error:
+    ticks = iter((20.0, 21.5))
+    monkeypatch.setattr("runbookos.ai.time.monotonic", lambda: next(ticks))
+    with pytest.raises(ProviderRequestTimeout, match="AI provider request timed out") as error:
         OpenAICompatibleProvider(config).complete("system", "sensitive user", 64, 0)
     assert "sensitive user" not in str(error.value)
     assert "private timeout detail" not in str(error.value)
+    assert error.value.elapsed_seconds == 1.5
 
 
 def test_json_parser_only_repairs_missing_trailing_delimiters():

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import sqlite3
@@ -663,9 +664,21 @@ class SQLiteStore:
             ):
                 clean["token_usage"] = usage
         else:
-            if proposal != {"proposal_version": 1, "outcome": "unavailable"}:
+            base_failure = {"proposal_version": 1, "outcome": "unavailable"}
+            timeout_keys = set(base_failure) | {"failure_stage", "duration_seconds"}
+            timeout_duration = proposal.get("duration_seconds")
+            if proposal != base_failure and not (
+                set(proposal) == timeout_keys
+                and proposal.get("proposal_version") == 1
+                and proposal.get("outcome") == "unavailable"
+                and proposal.get("failure_stage") == "proposal"
+                and isinstance(timeout_duration, (int, float))
+                and not isinstance(timeout_duration, bool)
+                and math.isfinite(timeout_duration)
+                and 0 <= timeout_duration <= 3600
+            ):
                 raise ConfigurationError("rejected proposals may store only a sanitized outcome")
-            clean = proposal
+            clean = dict(proposal)
         proposal_hash = hashlib.sha256(canonical_json(clean).encode("utf-8")).hexdigest()
         with self._connection() as db:
             db.execute("BEGIN IMMEDIATE")
