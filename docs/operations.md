@@ -14,7 +14,7 @@ Inspect `runbookos --help`. Validate a runbook first; create a plan and review e
 - Run `runbookos audit` to verify the local event chain. Back up the DB with restrictive permissions and send an independent copy to trusted storage for recovery.
 - `runbookos investigate --incident-stdin` reads bounded incident text from stdin, selects from the configured diagnostic catalog, executes only policy-allowed read-only diagnostics, and stores a validated Minimal Semantic Reply v2 assessment. Review linked evidence and assertion/verification states through `runbookos history EXECUTION_UUID` and the incident assessment projection. Model classifications remain suspected, confidence is uncalibrated, and citations do not prove semantic support. Provider or contract failures are persisted as sanitized failed investigations; they are not abstentions or diagnoses. Assessment text is advisory and cannot approve or execute a plan.
 - `runbookos investigations` lists investigation metadata and evidence references without echoing incident text. Additive migrations have advanced SQLite to `user_version=4` while retaining prior plan, approval, execution, investigation, incident, and audit data. Downgrade is unsupported.
-- SQLite schema version is currently v4. Use the SQLite backup API for a consistent backup while the controller is running; never copy only the main database file when WAL mode may be active. Write backups to a new owner-only path and verify the copy before considering recovery.
+- SQLite schema version is currently v4. Use `runbookos state backup` for a consistent backup while WAL mode is active; never copy only the main database file. Verify the new copy before considering recovery.
 - Read-only `systemd.journal_tail` is available only when explicitly allowed by the target policy. It accepts a registered unit and at most 50 lines, enforces a 10-second maximum timeout and a 64 KiB remote-output cap, and redacts common credential patterns. Logs remain sensitive and redaction is not exhaustive; keep the action default-deny unless the data handling is approved.
 - `network.resolver_config` reads at most 4 KiB from `/etc/resolv.conf` and reports configured nameservers/search domains. It does not perform a DNS query and does not establish that resolution works. It also remains subject to the normal per-host default-deny policy.
 - Provider timeouts, invalid JSON, unknown diagnostic IDs, unsupported evidence references, or policy denial stop the investigation. No tool call is retried and no recommendation is executed.
@@ -30,28 +30,18 @@ If the controller process stops, inspect SQLite history. If a row remains `runni
 
 ### Schema-v4 backup and restore rehearsal
 
-Use a fresh private directory and a destination that does not already exist. The SQLite backup API produces a consistent copy while WAL mode is active:
+Use an existing directory owned by the current user with mode 0700 and a destination filename that does not exist. The source database and its parent must also be private and owned by the current user. These commands work offline and do not require inventory, SSH, or a provider:
 
 ```sh
 umask 077
 install -d -m 700 "$BACKUP_DIR"
-test ! -e "$BACKUP_DIR/runbookos.sqlite3"
-python - "$DB_PATH" "$BACKUP_DIR/runbookos.sqlite3" <<'PY'
-import sqlite3, sys
-source, destination = sys.argv[1:]
-with sqlite3.connect(f"file:{source}?mode=ro", uri=True) as src:
-    with sqlite3.connect(destination) as dst:
-        src.backup(dst)
-with sqlite3.connect(f"file:{destination}?mode=ro", uri=True) as restored:
-    assert restored.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
-    assert restored.execute("PRAGMA foreign_key_check").fetchall() == []
-    assert restored.execute("PRAGMA user_version").fetchone()[0] == 4
-PY
-chmod 600 "$BACKUP_DIR/runbookos.sqlite3"
-runbookos --db "$BACKUP_DIR/runbookos.sqlite3" audit
+runbookos --db "$DB_PATH" state backup --output "$BACKUP_DIR/runbookos.sqlite3"
+runbookos state verify-backup "$BACKUP_DIR/runbookos.sqlite3"
 ```
 
-The repository regression suite exercises the SQLite backup API on a disposable schema-v4 database and checks incident links and the audit chain. For recovery, restore to a **new** path, run integrity, foreign-key, and audit checks there, and compare expected configuration/identity references. Do not overwrite the active database or change its configured path without separate deployment authorization. Schema downgrade is unsupported; package rollback does not roll back a database migration.
+Both commands print only JSON `status` (`PASS`, `FAIL`, or `UNKNOWN`) and a fixed `reason_code`; exit code 0 means PASS and 1 means failure or an unknown outcome. Successful output also gives schema version, audit event count, and `audit_empty`. An empty chain passes only for an otherwise empty state; the chain is locally tamper-evident but lacks an external trusted anchor. A valid chain does not establish causal correctness or external provenance. Backup creates a private partial file, validates the snapshot with SQLite integrity, foreign-key, schema-v4, and audit checks, then atomically publishes the new destination. It will not overwrite an existing path or follow symlinked path components. On interruption, only the command's own partial file is removed; an `UNKNOWN` result after publication may leave a complete destination that the operator must verify separately.
+
+Keep the backup directory on a trusted filesystem with trusted ownership and restrictive permissions. The snapshot contains sensitive incident and evidence data. Encrypted and off-host storage, retention, and access control are the operator's responsibility. The source connection uses SQLite `mode=ro`; in WAL mode SQLite may still create or update auxiliary `-shm` sidecar state to coordinate readers. The main source database is not migrated or written by these commands. `verify-backup` opens the snapshot immutable/read-only and does not mutate it. For recovery, restore to a **new** path, run integrity, foreign-key, and audit checks there, and compare expected configuration/identity references. Do not overwrite the active database or change its configured path without separate deployment authorization. Schema downgrade is unsupported; package rollback does not roll back a database migration. This offline feature does not establish the production recovery gate.
 
 For a controller or managed-host outage, use the environment owner's independent console/recovery path. RunbookOS does not change network topology, firewall policy, or install agents as part of diagnosis. Its optional inference tunnel is foreground-only and must be stopped by its operator; RunbookOS does not create a service unit or auto-start configuration.
 
