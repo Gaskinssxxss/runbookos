@@ -47,7 +47,7 @@ from .evaluation_v2 import (
 from .incidents import IncidentStore, parse_alert, validate_target
 from .models import Policy
 from .remediation_proposal import RegisteredActionCandidate
-from .state_backup import create_backup, verify_backup
+from .state_backup import create_backup, rehearse_restore, review_staging, verify_backup
 from .store import SQLiteStore
 from .tunnel import load_tunnel_config, run_tunnel
 from .webhook import serve_from_environment
@@ -153,6 +153,31 @@ def state_verify_backup(
 ) -> None:
     """Validate a backup without modifying it."""
     result = verify_backup(path)
+    _json(result)
+    if result["status"] != "PASS":
+        raise typer.Exit(1)
+
+
+@state_app.command("rehearse-restore")
+def state_rehearse_restore(
+    backup: Path = typer.Argument(..., help="Existing verified private SQLite backup."),
+    output: Path = typer.Option(
+        ..., "--output", help="New staging path in an existing owner-only directory."
+    ),
+) -> None:
+    """Copy a backup to a new staging DB and verify it without activation."""
+    result = rehearse_restore(backup, output)
+    _json(result)
+    if result["status"] != "PASS":
+        raise typer.Exit(1)
+
+
+@state_app.command("review-staging")
+def state_review_staging(
+    path: Path = typer.Argument(..., help="Existing private staging database."),
+) -> None:
+    """Read restored history counts from a staging DB without changing it."""
+    result = review_staging(path)
     _json(result)
     if result["status"] != "PASS":
         raise typer.Exit(1)
