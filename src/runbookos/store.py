@@ -534,11 +534,18 @@ class SQLiteStore:
         }
 
     def verify_audit_chain(self) -> tuple[bool, int]:
+        with self._connection() as db:
+            return self.verify_audit_chain_connection(db)
+
+    @staticmethod
+    def verify_audit_chain_connection(db: sqlite3.Connection) -> tuple[bool, int]:
+        """Verify an existing connection without initializing or migrating its database."""
         expected_prev = _ZERO_HASH
         count = 0
-        with self._connection() as db:
-            rows = db.execute("SELECT * FROM audit_events ORDER BY sequence").fetchall()
+        rows = db.execute("SELECT * FROM audit_events ORDER BY sequence").fetchall()
         for row in rows:
+            if row["sequence"] != count + 1:
+                return False, count
             if row["previous_hash"] != expected_prev:
                 return False, count
             payload = json.loads(row["payload_json"])

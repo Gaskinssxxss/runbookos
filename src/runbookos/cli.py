@@ -47,6 +47,7 @@ from .evaluation_v2 import (
 from .incidents import IncidentStore, parse_alert, validate_target
 from .models import Policy
 from .remediation_proposal import RegisteredActionCandidate
+from .state_backup import create_backup, verify_backup
 from .store import SQLiteStore
 from .tunnel import load_tunnel_config, run_tunnel
 from .webhook import serve_from_environment
@@ -80,10 +81,12 @@ alerts_app = typer.Typer(no_args_is_help=True, help="Ingest and inspect alert ev
 incidents_app = typer.Typer(no_args_is_help=True, help="Manage human-controlled incidents.")
 webhook_app = typer.Typer(no_args_is_help=True, help="Run the optional loopback alert webhook.")
 dashboard_app = typer.Typer(no_args_is_help=True, help="Run the optional local operator dashboard.")
+state_app = typer.Typer(no_args_is_help=True, help="Create and verify local SQLite backups.")
 app.add_typer(alerts_app, name="alerts")
 app.add_typer(incidents_app, name="incidents")
 app.add_typer(webhook_app, name="webhook")
 app.add_typer(dashboard_app, name="dashboard")
+app.add_typer(state_app, name="state")
 
 
 def _path(value: Path) -> Path:
@@ -108,6 +111,7 @@ def main(
         STATE_DEFAULT / "runbookos.sqlite3", "--db", help="Local SQLite execution/audit database."
     ),
 ) -> None:
+    ctx.meta["state_database_argument"] = database
     ctx.obj = Paths(
         inventory=_path(inventory),
         policy=_path(policy),
@@ -127,6 +131,31 @@ def _fail(exc: Exception, code: int = 2) -> None:
 
 def _json(value: Any) -> None:
     typer.echo(json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False))
+
+
+@state_app.command("backup")
+def state_backup(
+    ctx: typer.Context,
+    output: Path = typer.Option(
+        ..., "--output", help="New file in an existing owner-only directory."
+    ),
+) -> None:
+    """Create and validate a consistent local SQLite snapshot."""
+    result = create_backup(ctx.meta["state_database_argument"], output)
+    _json(result)
+    if result["status"] != "PASS":
+        raise typer.Exit(1)
+
+
+@state_app.command("verify-backup")
+def state_verify_backup(
+    path: Path = typer.Argument(..., help="Existing private SQLite backup."),
+) -> None:
+    """Validate a backup without modifying it."""
+    result = verify_backup(path)
+    _json(result)
+    if result["status"] != "PASS":
+        raise typer.Exit(1)
 
 
 @app.command()
