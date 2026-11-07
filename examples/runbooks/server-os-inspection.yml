@@ -1,0 +1,60 @@
+api_version: runbookos/v1
+kind: Runbook
+metadata:
+  id: server-os-inspection
+  name: Server and OS inspection
+  description: Bounded read-only CPU, process, storage, service, package, timer, and cron review.
+  risk: low
+targets: [example-web-01]
+steps:
+  - id: cpu-load
+    action: os.cpu
+    timeout_seconds: 3
+    verify: [{path: data.logical_cpu_count, operator: gt, value: 0}]
+  - id: operating-system
+    action: os.release
+    timeout_seconds: 3
+    verify: [{path: data.kernel_release, operator: nonempty}]
+  - id: processes
+    action: process.list
+    with: {limit: 25, order_by: memory_rss}
+    timeout_seconds: 5
+    verify: [{path: data.processes, operator: nonempty}]
+  - id: filesystem-mounts
+    action: filesystem.mounts
+    timeout_seconds: 5
+    verify: [{path: data.mounts, operator: nonempty}]
+  - id: root-inodes
+    action: filesystem.inodes
+    with: {path: /}
+    timeout_seconds: 3
+    verify: [{path: data.inode_capacity_known, operator: is_true}]
+  - id: nginx-state
+    action: systemd.service_status
+    with: {unit: nginx.service}
+    timeout_seconds: 10
+    verify: [{path: data.loaded, operator: is_true}]
+  - id: failed-units
+    action: systemd.failed_units
+    timeout_seconds: 10
+    verify: [{path: data.units, operator: empty}]
+  - id: nginx-journal-summary
+    action: systemd.journal_summary
+    with: {unit: nginx.service, window_minutes: 60, max_entries: 100}
+    timeout_seconds: 10
+    verify: [{path: data.messages_included, operator: eq, value: false}]
+  - id: timers
+    action: systemd.timers
+    with: {limit: 50}
+    timeout_seconds: 10
+    verify: [{path: data.timer_count, operator: gte, value: 0}]
+  - id: package-inventory
+    action: os.packages
+    with: {limit: 25}
+    timeout_seconds: 10
+    verify: [{path: data.package_count, operator: gte, value: 0}]
+  - id: cron-summary
+    action: os.cron
+    with: {limit: 50}
+    timeout_seconds: 5
+    verify: [{path: data.entry_count, operator: gte, value: 0}]

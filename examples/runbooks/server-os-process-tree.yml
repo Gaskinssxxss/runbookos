@@ -1,0 +1,20 @@
+api_version: runbookos/v1
+kind: Runbook
+metadata:
+  id: server-os-process-tree
+  name: Inspect a process tree
+  description: Bounded process metadata for the sample PID 1; edit the numeric PID before planning another review.
+  risk: low
+targets: [example-app-01]
+preflight:
+  - id: process-exists
+    action: process.inspect
+    with: {pid: 1}
+    timeout_seconds: 3
+    verify: [{path: data.process.pid, operator: eq, value: 1}]
+steps:
+  - id: process-tree
+    action: process.tree
+    with: {pid: 1, max_depth: 4, max_nodes: 50}
+    timeout_seconds: 5
+    verify: [{path: data.root_pid, operator: eq, value: 1}]

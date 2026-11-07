@@ -4,7 +4,7 @@ import base64
 import json
 import shlex
 
-REMOTE_SOURCE = r"""import base64, http.client, ipaddress, json, os, re, selectors, shutil, socket, ssl, struct, subprocess, sys, time
+REMOTE_SOURCE = r"""import base64, http.client, ipaddress, json, os, re, selectors, shutil, socket, ssl, stat, struct, subprocess, sys, time
 def emit(ok, data=None, error=None, uncertain=False):
     print(json.dumps({"ok": ok, "data": data or {}, "error": error, "uncertain": uncertain}, separators=(",", ":")))
 def probe_endpoint(action, args, timeout):
@@ -121,6 +121,118 @@ def safe_log_message(value):
     text=re.sub(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----","[REDACTED PRIVATE KEY]",text,flags=re.S)
     text="".join(ch for ch in text if ch in "\t" or ch.isprintable())
     return text[:1024]
+def proc_record(pid):
+    if isinstance(pid,bool) or not isinstance(pid,int) or not 1 <= pid <= 4194304: return None
+    try:
+        with open("/proc/"+str(pid)+"/stat",encoding="ascii") as stream: raw=stream.read(4096)
+        end=raw.rfind(")")
+        if end < 0: return None
+        comm=raw[raw.find("(")+1:end][:15]
+        fields=raw[end+2:].split()
+        if len(fields)<22: return None
+        state=fields[0]
+        ppid=int(fields[1]); user_ticks=int(fields[11]); system_ticks=int(fields[12]); start_ticks=int(fields[19]); rss_pages=max(0,int(fields[21]))
+        uid=os.stat("/proc/"+str(pid)).st_uid
+        return {"pid":pid,"parent_pid":ppid,"name":safe_log_message(comm)[:15],"state":state[:1],"uid":uid,"user_cpu_ticks":user_ticks,"system_cpu_ticks":system_ticks,"start_time_ticks":start_ticks,"rss_bytes":rss_pages*os.sysconf("SC_PAGE_SIZE")}
+    except (OSError,ValueError,IndexError): return None
+def proc_snapshot(scan_limit=4096, timeout=4):
+    deadline=time.monotonic()+timeout
+    records=[]; scanned=0; examined=0; unavailable=0; truncated=False
+    try:
+        with os.scandir("/proc") as entries:
+            for entry in entries:
+                examined+=1
+                if examined>8192 or time.monotonic()>=deadline:
+                    truncated=True; break
+                if not entry.name.isdigit(): continue
+                if scanned>=scan_limit or time.monotonic()>=deadline:
+                    truncated=True; break
+                scanned+=1
+                record=proc_record(int(entry.name))
+                if record is not None: records.append(record)
+                else: unavailable+=1
+    except OSError:
+        return None,scanned,truncated,unavailable
+    return records,scanned,truncated,unavailable
+def mount_records(limit=128):
+    try:
+        with open("/proc/self/mountinfo",encoding="utf-8",errors="replace") as stream: raw=stream.read(65537)
+    except OSError: return None,False
+    if len(raw)>65536: return None,False
+    records=[]; truncated=False; lines=raw.splitlines()
+    if len(lines)>4096: truncated=True
+    for line in lines[:4096]:
+        left,separator,right=line.partition(" - ")
+        before=left.split()
+        after=right.split()
+        if not separator or len(before)<6 or len(after)<3: continue
+        def unescape(value):
+            return re.sub(r"\\([0-7]{3})",lambda match:chr(int(match.group(1),8)),value)
+        mountpoint=unescape(before[4])
+        options=before[5].split(",")
+        records.append({"mountpoint":mountpoint[:512],"filesystem_type":after[0][:64],"read_only":"ro" in options})
+        if len(records)>=limit: truncated=True; break
+    return records,truncated
+def read_bounded_regular(path,limit):
+    fd=None
+    try:
+        fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
+        metadata=os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size>limit: return None
+        data=os.read(fd,limit+1)
+        if len(data)>limit: return None
+        return data.decode("utf-8","replace")
+    except OSError: return None
+    finally:
+        if fd is not None: os.close(fd)
+def cron_records(limit=50):
+    entries=[]; periodic=[]; total_bytes=0; truncated=False; unrecognized=0
+    fixed_files=["/etc/crontab"]
+    try:
+        with os.scandir("/etc/cron.d") as directory:
+            names=[]
+            for item in directory:
+                if len(names)>=64: truncated=True; break
+                if item.is_file(follow_symlinks=False) and not item.is_symlink(): fixed_files.append("/etc/cron.d/"+item.name)
+                names.append(item.name)
+            fixed_files[1:]=sorted(fixed_files[1:])
+    except OSError: pass
+    for path in fixed_files:
+        if len(entries)>=limit: truncated=True; break
+        try:
+            if os.path.islink(path): continue
+            content=read_bounded_regular(path,16384)
+            if content is None: truncated=True; continue
+            size=len(content.encode("utf-8"))
+            if total_bytes+size>65536: truncated=True; continue
+            total_bytes+=size
+            lines=content.splitlines()
+        except OSError: continue
+        if len(lines)>512: truncated=True
+        for line in lines[:512]:
+            fields=line.split()
+            if not fields or line.lstrip().startswith("#") or "=" in fields[0]: continue
+            if fields[0].startswith("@"):
+                schedule=fields[0]
+                if len(fields)<3: unrecognized+=1; continue
+            else:
+                if len(fields)<7: unrecognized+=1; continue
+                schedule=" ".join(fields[:5])
+            if not re.fullmatch(r"[A-Za-z0-9*/?,@#-]{1,100}(?: [A-Za-z0-9*/?,@#-]{1,100}){0,4}",schedule): unrecognized+=1; continue
+            entries.append({"source":safe_log_message(path.rsplit("/",1)[-1] if path!="/etc/crontab" else "crontab")[:128],"schedule":schedule})
+            if len(entries)>=limit: truncated=True; break
+    for name in ("hourly","daily","weekly","monthly"):
+        path="/etc/cron."+name
+        try:
+            with os.scandir(path) as directory:
+                count=0; entries_seen=0
+                for item in directory:
+                    entries_seen+=1
+                    if entries_seen>2048: truncated=True; break
+                    if item.is_file(follow_symlinks=False) and not item.is_symlink(): count+=1
+            periodic.append({"frequency":name,"job_count":count,"count_capped":entries_seen>2048})
+        except OSError: continue
+    return {"entries":entries,"periodic_directories":periodic,"entry_count":len(entries),"unrecognized_job_lines":unrecognized,"output_truncated":truncated}
 try:
     req=json.loads(base64.b64decode(sys.argv[1]))
     action=req.get("action")
@@ -210,10 +322,44 @@ try:
         quota_match=re.fullmatch(r"([0-9.]+)(us|ms|s)",raw_quota)
         quota_percent=(float(quota_match[1])*{"us":0.0001,"ms":0.1,"s":100}[quota_match[2]]) if quota_match else None
         emit(r.returncode==0,{"fixture_id":"worker_quota","unit":"runbookos-campaign-b04-worker.service","properties":properties,"cpu_quota_percent":quota_percent,"baseline_cpu_quota_percent":30,"quota_below_baseline":None if quota_percent is None else quota_percent<30},None if r.returncode==0 else "fixture_resource_read_failed")
+    elif action == "systemd.service_status":
+        unit=args.get("unit")
+        if not isinstance(unit,str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.@:-]{0,127}\.service",unit): raise ValueError("service unit denied")
+        if not isinstance(timeout,int) or isinstance(timeout,bool) or not 1<=timeout<=10: raise ValueError("service status timeout denied")
+        raw,error=bounded_stdout(["/usr/bin/systemctl","show","--no-pager","--property=Id,LoadState,ActiveState,SubState,UnitFileState,Result,ExecMainStatus",unit],timeout,8192)
+        if error: emit(False,{"unit":unit,"properties":{}},error)
+        else:
+            allowed={"Id","LoadState","ActiveState","SubState","UnitFileState","Result","ExecMainStatus"}
+            properties={}
+            for line in raw.decode("utf-8","replace").splitlines()[:16]:
+                key,separator,value=line.partition("=")
+                if separator and key in allowed: properties[key]=safe_log_message(value)[:128]
+            if not {"Id","LoadState","ActiveState","SubState"}.issubset(properties): emit(False,{"unit":unit,"properties":properties},"invalid_service_status_output")
+            else: emit(True,{"unit":unit,"properties":properties,"loaded":properties.get("LoadState")=="loaded","active":properties.get("ActiveState")=="active"})
     elif action == "systemd.failed_units":
-        r=subprocess.run(["/usr/bin/systemctl","list-units","--failed","--no-legend","--plain"],capture_output=True,text=True,timeout=timeout,check=False)
-        units=[line.split()[0] for line in r.stdout.splitlines() if line.split()]
-        emit(r.returncode == 0, {"units":units}, r.stderr.strip() or None)
+        if not isinstance(timeout,int) or isinstance(timeout,bool) or not 1<=timeout<=15: raise ValueError("failed units timeout denied")
+        raw,error=bounded_stdout(["/usr/bin/systemctl","list-units","--failed","--no-legend","--plain","--no-pager"],timeout,16384)
+        if error: emit(False,{"units":[]},error)
+        else:
+            units=[line.split()[0][:128] for line in raw.decode("utf-8","replace").splitlines() if line.split()][:100]
+            emit(True,{"units":units,"unit_count":len(units),"output_truncated":len(units)>=100})
+    elif action == "systemd.timers":
+        limit=args.get("limit",50)
+        if type(limit) is not int or not 1<=limit<=100: raise ValueError("timer limit denied")
+        if not isinstance(timeout,int) or isinstance(timeout,bool) or not 1<=timeout<=10: raise ValueError("timer timeout denied")
+        raw,error=bounded_stdout(["/usr/bin/systemctl","list-timers","--all","--no-legend","--no-pager"],timeout,32768)
+        if error: emit(False,{"timers":[]},error)
+        else:
+            timers=[]
+            for line in raw.decode("utf-8","replace").splitlines():
+                fields=line.split()
+                timer_index=next((index for index,field in enumerate(fields) if re.fullmatch(r"[A-Za-z0-9_.@:-]{1,128}\.timer",field)),None)
+                if timer_index is None: continue
+                timer=fields[timer_index]
+                activates=fields[timer_index+1] if timer_index+1<len(fields) and re.fullmatch(r"[A-Za-z0-9_.@:-]{1,128}\.(service|target)",fields[timer_index+1]) else None
+                timers.append({"unit":timer,"activates":activates,"schedule_summary":" ".join(fields[:timer_index])[:160]})
+                if len(timers)>=limit: break
+            emit(True,{"timers":timers,"timer_count":len(timers),"output_truncated":len(timers)>=limit})
     elif action == "systemd.journal_tail":
         unit=args.get("unit")
         lines=args.get("lines",20)
@@ -234,6 +380,25 @@ try:
                 entries.append({"timestamp_usec":str(item.get("__REALTIME_TIMESTAMP",""))[:24],"priority":str(item.get("PRIORITY",""))[:2],"message":safe_log_message(item.get("MESSAGE",""))})
             else:
                 emit(True,{"unit":unit,"entries":entries,"entry_count":len(entries),"output_truncated":False})
+    elif action == "systemd.journal_summary":
+        unit=args.get("unit"); window=args.get("window_minutes",60); maximum=args.get("max_entries",100)
+        if not isinstance(unit,str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.@:-]{0,127}\.(service|timer)",unit): raise ValueError("journal unit denied")
+        if type(window) is not int or not 1<=window<=1440 or type(maximum) is not int or not 1<=maximum<=200: raise ValueError("journal summary bounds denied")
+        if not isinstance(timeout,int) or isinstance(timeout,bool) or not 1<=timeout<=10: raise ValueError("journal summary timeout denied")
+        raw,error=bounded_stdout(["/usr/bin/journalctl","--unit",unit,"--since",str(window)+" minutes ago","--lines",str(maximum),"--no-pager","--output=json"],timeout,65536)
+        if error: emit(False,{"unit":unit,"entry_count":0,"priority_counts":{}},error)
+        else:
+            counts={str(priority):0 for priority in range(8)}; timestamps=[]; valid=True; sampled=0
+            for line in raw.splitlines()[:maximum]:
+                try: item=json.loads(line)
+                except (json.JSONDecodeError,UnicodeDecodeError): valid=False; break
+                priority=str(item.get("PRIORITY",""))
+                if priority in counts: counts[priority]+=1
+                timestamp=str(item.get("__REALTIME_TIMESTAMP",""))
+                if timestamp.isdigit(): timestamps.append(timestamp[:24])
+                sampled+=1
+            if not valid: emit(False,{"unit":unit,"entry_count":0,"priority_counts":{}},"invalid_journal_record")
+            else: emit(True,{"unit":unit,"window_minutes":window,"entry_count":sampled,"priority_counts":counts,"earliest_timestamp_usec":min(timestamps) if timestamps else None,"latest_timestamp_usec":max(timestamps) if timestamps else None,"sample_limit_reached":sampled>=maximum,"messages_included":False})
     elif action == "network.resolver_config":
         try:
             with open("/etc/resolv.conf",encoding="utf-8",errors="replace") as stream:
@@ -276,6 +441,38 @@ try:
     elif action == "os.uptime":
         raw=open("/proc/uptime",encoding="ascii").read().split()[0]
         emit(True,{"seconds":int(float(raw))})
+    elif action == "os.cpu":
+        if not isinstance(timeout,int) or isinstance(timeout,bool) or not 1<=timeout<=3: raise ValueError("CPU diagnostic timeout denied")
+        raw=open("/proc/stat",encoding="ascii").read(32769)
+        if len(raw)>32768: raise ValueError("CPU statistics exceed limit")
+        cpus=[]
+        names=("user","nice","system","idle","iowait","irq","softirq","steal","guest","guest_nice")
+        for line in raw.splitlines():
+            fields=line.split()
+            if not fields or not re.fullmatch(r"cpu[0-9]*",fields[0]): continue
+            if len(cpus)>=257: break
+            ticks=[int(value) for value in fields[1:11] if value.isdigit()]
+            if len(ticks)<4: continue
+            cpus.append({"cpu":fields[0],"ticks":{name:ticks[index] if index<len(ticks) else 0 for index,name in enumerate(names)}})
+        load=open("/proc/loadavg",encoding="ascii").read(256).split()
+        if not load or not cpus: raise ValueError("CPU statistics unavailable")
+        logical=max(1,os.cpu_count() or len(cpus)-1)
+        averages=[float(value) for value in load[:3]]
+        emit(True,{"logical_cpu_count":logical,"load_average_1m":averages[0],"load_average_5m":averages[1],"load_average_15m":averages[2],"load_per_logical_cpu_1m":round(averages[0]/logical,4),"cpu_counters":cpus,"cpu_count_includes_aggregate":True})
+    elif action == "os.release":
+        if not isinstance(timeout,int) or isinstance(timeout,bool) or not 1<=timeout<=3: raise ValueError("OS release timeout denied")
+        try:
+            with open("/etc/os-release",encoding="utf-8",errors="replace") as stream: content=stream.read(8193)
+        except OSError: content=""
+        if len(content)>8192: emit(False,{},"os_release_exceeds_limit")
+        else:
+            values={}
+            for line in content.splitlines()[:128]:
+                key,separator,value=line.partition("=")
+                if separator and key in ("ID","ID_LIKE","NAME","VERSION_ID"):
+                    values[key]=safe_log_message(value.strip().strip("\\\"'"))[:128]
+            identity=os.uname()
+            emit(True,{"distribution_id":values.get("ID"),"distribution_id_like":values.get("ID_LIKE"),"distribution_name":values.get("NAME"),"distribution_version":values.get("VERSION_ID"),"kernel_name":safe_log_message(identity.sysname)[:64],"kernel_release":safe_log_message(identity.release)[:128],"machine_architecture":safe_log_message(identity.machine)[:64]})
     elif action == "os.memory":
         values={}
         for line in open("/proc/meminfo",encoding="ascii"):
@@ -283,11 +480,108 @@ try:
             parts=value.split()
             if parts and parts[0].isdigit(): values[key]=int(parts[0])*(1024 if len(parts)>1 and parts[1]=="kB" else 1)
         emit(True,{"total_bytes":values.get("MemTotal",0),"available_bytes":values.get("MemAvailable",0),"swap_total_bytes":values.get("SwapTotal",0),"swap_free_bytes":values.get("SwapFree",0)})
+    elif action == "process.list":
+        limit=args.get("limit",50); order=args.get("order_by","pid")
+        if type(limit) is not int or not 1<=limit<=100 or order not in ("pid","memory_rss"): raise ValueError("process list bounds denied")
+        if not isinstance(timeout,int) or isinstance(timeout,bool) or not 1<=timeout<=5: raise ValueError("process list timeout denied")
+        records,scanned,scan_truncated,unavailable=proc_snapshot(4096,min(timeout,4))
+        if records is None: emit(False,{"processes":[]},"process_snapshot_unavailable")
+        else:
+            if order=="memory_rss": records.sort(key=lambda item:(-item["rss_bytes"],item["pid"]))
+            else: records.sort(key=lambda item:item["pid"])
+            selected=records[:limit]
+            output_truncated=len(records)>limit
+            inventory_complete=not scan_truncated and unavailable==0 and not output_truncated
+            emit(True,{"processes":selected,"process_count":len(selected),"scanned_processes":scanned,"unavailable_processes":unavailable,"truncated":scan_truncated or output_truncated,"scan_truncated":scan_truncated,"inventory_complete":inventory_complete,"order_by":order,"command_lines_included":False})
+    elif action == "process.inspect":
+        pid=args.get("pid")
+        if isinstance(pid,bool) or not isinstance(pid,int) or not 1<=pid<=4194304: raise ValueError("process identity denied")
+        record=proc_record(pid)
+        if record is None: emit(False,{"pid":pid},"process_unavailable")
+        else: emit(True,{"process":record,"command_line_included":False})
+    elif action == "process.tree":
+        pid=args.get("pid"); depth_limit=args.get("max_depth",4); node_limit=args.get("max_nodes",50)
+        if isinstance(pid,bool) or not isinstance(pid,int) or not 1<=pid<=4194304 or type(depth_limit) is not int or not 1<=depth_limit<=8 or type(node_limit) is not int or not 1<=node_limit<=100: raise ValueError("process tree bounds denied")
+        if not isinstance(timeout,int) or isinstance(timeout,bool) or not 1<=timeout<=5: raise ValueError("process tree timeout denied")
+        records,scanned,scan_truncated,unavailable=proc_snapshot(4096,min(timeout,4))
+        if records is None: emit(False,{"root_pid":pid,"processes":[]},"process_snapshot_unavailable")
+        else:
+            by_pid={item["pid"]:item for item in records}; children={}
+            for item in records: children.setdefault(item["parent_pid"],[]).append(item["pid"])
+            for values in children.values(): values.sort()
+            if pid not in by_pid: emit(False,{"root_pid":pid,"processes":[]},"process_unavailable")
+            else:
+                tree=[]; queue=[(pid,0)]; omitted=False
+                while queue:
+                    current,depth=queue.pop(0)
+                    if len(tree)>=node_limit: omitted=True; break
+                    node=dict(by_pid[current]); node["depth"]=depth; tree.append(node)
+                    descendants=children.get(current,[])
+                    if depth<depth_limit: queue.extend((child,depth+1) for child in descendants)
+                    elif descendants: omitted=True
+                truncated=omitted or scan_truncated or unavailable>0
+                emit(True,{"root_pid":pid,"processes":tree,"node_count":len(tree),"truncated":truncated,"scan_truncated":scan_truncated,"inventory_complete":not truncated,"scanned_processes":scanned,"unavailable_processes":unavailable,"command_lines_included":False})
     elif action == "os.disk":
         path=args.get("path","/")
         if not isinstance(path,str) or not path.startswith("/") or "\x00" in path: raise ValueError("invalid path")
         d=shutil.disk_usage(path)
         emit(True,{"path":path,"total_bytes":d.total,"used_bytes":d.used,"free_bytes":d.free,"percent":int(d.used*100/d.total) if d.total else 0})
+    elif action == "filesystem.mounts":
+        if not isinstance(timeout,int) or isinstance(timeout,bool) or not 1<=timeout<=5: raise ValueError("mount diagnostic timeout denied")
+        mounts,truncated=mount_records(128)
+        if mounts is None: emit(False,{"mounts":[]},"mount_inventory_unavailable")
+        else: emit(True,{"mounts":mounts,"mount_count":len(mounts),"possibly_truncated":truncated,"device_sources_included":False})
+    elif action == "filesystem.inodes":
+        path=args.get("path")
+        if not isinstance(path,str) or len(path)>256 or not path.startswith("/") or any(char in path for char in "\x00\n\r") or ".." in path.split("/"): raise ValueError("filesystem path denied")
+        if not isinstance(timeout,int) or isinstance(timeout,bool) or not 1<=timeout<=3: raise ValueError("inode diagnostic timeout denied")
+        raw,error=bounded_stdout(["/usr/bin/stat","--file-system","--format=%T|%c|%d","--",path],timeout,4096)
+        if error: emit(False,{"path":path},error)
+        else:
+            fields=raw.decode("utf-8","replace").strip().split("|")
+            if len(fields)!=3 or not all(value.isdigit() for value in fields[1:]): emit(False,{"path":path},"invalid_filesystem_statistics")
+            else:
+                fs_type,total_inodes,free_inodes=fields
+                total=int(total_inodes); free=int(free_inodes)
+                emit(True,{"path":path,"filesystem_type":fs_type[:64],"total_inodes":total,"free_inodes":free,"used_percent":round((total-free)*100/total,2) if total else None,"inode_capacity_known":total>0})
+    elif action == "os.packages":
+        limit=args.get("limit",50)
+        if type(limit) is not int or not 1<=limit<=100: raise ValueError("package inventory limit denied")
+        if not isinstance(timeout,int) or isinstance(timeout,bool) or not 1<=timeout<=10: raise ValueError("package inventory timeout denied")
+        if os.path.isfile("/usr/bin/dpkg-query"):
+            argv=["/usr/bin/dpkg-query","-W","-f=${binary:Package}\\t${Version}\\t${db:Status-Abbrev}\\n"]; manager="dpkg"
+        elif os.path.isfile("/usr/bin/rpm"):
+            argv=["/usr/bin/rpm","-qa","--qf","%{NAME}\\t%{VERSION}-%{RELEASE}\\n"]; manager="rpm"
+        else: argv=None; manager=None
+        if argv is None: emit(False,{"packages":[],"manager":None,"package_count":0,"inventory_count":0},"package_manager_unavailable")
+        else:
+            raw,error=bounded_stdout(argv,timeout,262144)
+            if error: emit(False,{"packages":[],"manager":manager},error)
+            else:
+                packages=[]
+                for line in raw.decode("utf-8","replace").splitlines():
+                    fields=line.split("\t")
+                    if manager=="dpkg":
+                        if len(fields)!=3:
+                            emit(False,{"packages":[],"manager":manager},"invalid_package_record"); break
+                        if not fields[2].startswith("ii "): continue
+                        name,version=fields[:2]
+                    else:
+                        if len(fields)!=2:
+                            emit(False,{"packages":[],"manager":manager},"invalid_package_record"); break
+                        name,version=fields
+                    if not name or not version:
+                        emit(False,{"packages":[],"manager":manager},"invalid_package_record"); break
+                    packages.append({"name":safe_log_message(name)[:128],"version":safe_log_message(version)[:128]})
+                else:
+                    packages.sort(key=lambda item:(item["name"],item["version"]))
+                    emit(True,{"manager":manager,"packages":packages[:limit],"package_count":min(len(packages),limit),"inventory_count":len(packages),"output_truncated":len(packages)>limit})
+    elif action == "os.cron":
+        limit=args.get("limit",50)
+        if type(limit) is not int or not 1<=limit<=100: raise ValueError("cron inventory limit denied")
+        if not isinstance(timeout,int) or isinstance(timeout,bool) or not 1<=timeout<=5: raise ValueError("cron inventory timeout denied")
+        summary=cron_records(limit)
+        emit(True,summary)
     elif action == "network.interfaces":
         r=subprocess.run(["/usr/sbin/ip","-j","address","show"],capture_output=True,text=True,timeout=timeout,check=False)
         emit(r.returncode == 0,{"interfaces":json.loads(r.stdout) if r.returncode == 0 else []},r.stderr.strip() or None)
