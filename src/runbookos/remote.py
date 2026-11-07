@@ -487,9 +487,12 @@ try:
         records,scanned,scan_truncated,unavailable=proc_snapshot(4096,min(timeout,4))
         if records is None: emit(False,{"processes":[]},"process_snapshot_unavailable")
         else:
-            records.sort(key=lambda item:(item["rss_bytes"],item["pid"]) if order=="memory_rss" else (item["pid"],),reverse=order=="memory_rss")
-            selected=records[-limit:] if order=="memory_rss" else records[:limit]
-            emit(True,{"processes":selected,"process_count":len(selected),"scanned_processes":scanned,"unavailable_processes":unavailable,"scan_truncated":scan_truncated or len(records)>limit,"order_by":order,"command_lines_included":False})
+            if order=="memory_rss": records.sort(key=lambda item:(-item["rss_bytes"],item["pid"]))
+            else: records.sort(key=lambda item:item["pid"])
+            selected=records[:limit]
+            output_truncated=len(records)>limit
+            inventory_complete=not scan_truncated and unavailable==0 and not output_truncated
+            emit(True,{"processes":selected,"process_count":len(selected),"scanned_processes":scanned,"unavailable_processes":unavailable,"truncated":scan_truncated or output_truncated,"scan_truncated":scan_truncated,"inventory_complete":inventory_complete,"order_by":order,"command_lines_included":False})
     elif action == "process.inspect":
         pid=args.get("pid")
         if isinstance(pid,bool) or not isinstance(pid,int) or not 1<=pid<=4194304: raise ValueError("process identity denied")
@@ -516,7 +519,8 @@ try:
                     descendants=children.get(current,[])
                     if depth<depth_limit: queue.extend((child,depth+1) for child in descendants)
                     elif descendants: omitted=True
-                emit(True,{"root_pid":pid,"processes":tree,"node_count":len(tree),"truncated":omitted or scan_truncated or unavailable>0,"scanned_processes":scanned,"unavailable_processes":unavailable,"command_lines_included":False})
+                truncated=omitted or scan_truncated or unavailable>0
+                emit(True,{"root_pid":pid,"processes":tree,"node_count":len(tree),"truncated":truncated,"scan_truncated":scan_truncated,"inventory_complete":not truncated,"scanned_processes":scanned,"unavailable_processes":unavailable,"command_lines_included":False})
     elif action == "os.disk":
         path=args.get("path","/")
         if not isinstance(path,str) or not path.startswith("/") or "\x00" in path: raise ValueError("invalid path")

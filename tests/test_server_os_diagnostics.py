@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -88,6 +89,55 @@ def fake_command(monkeypatch, output: bytes, *, exit_code: int = 0, delay: float
 
     monkeypatch.setattr(subprocess, "Popen", popen)
     return calls
+
+
+def fake_process_table(
+    monkeypatch, processes: list[tuple[int, int]], *, truncate_scan: bool = False
+):
+    original_open = open
+    original_stat = os.stat
+    original_scandir = os.scandir
+    entries = [str(pid) for pid, _ in processes]
+    if truncate_scan:
+        entries.extend(f"fixture-{index}" for index in range(8192))
+
+    class Entry:
+        def __init__(self, name: str):
+            self.name = name
+
+    class Scan:
+        def __enter__(self):
+            return iter(Entry(name) for name in entries)
+
+        def __exit__(self, *args):
+            return None
+
+    rss_by_pid = dict(processes)
+
+    def fake_scandir(path):
+        if path == "/proc":
+            return Scan()
+        return original_scandir(path)
+
+    def fake_open(path, *args, **kwargs):
+        if path in {f"/proc/{pid}/stat" for pid, _ in processes}:
+            pid = int(path.split("/")[2])
+            fields = ["0"] * 22
+            fields[0] = "R"
+            fields[1] = "1"
+            fields[19] = "100"
+            fields[21] = str(rss_by_pid[pid])
+            return io.StringIO(f"{pid} (fixture-{pid}) " + " ".join(fields))
+        return original_open(path, *args, **kwargs)
+
+    def fake_stat(path, *args, **kwargs):
+        if path in {f"/proc/{pid}" for pid, _ in processes}:
+            return SimpleNamespace(st_uid=1000)
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "scandir", fake_scandir)
+    monkeypatch.setattr(os, "stat", fake_stat)
+    monkeypatch.setattr("builtins.open", fake_open)
 
 
 @pytest.mark.parametrize(
@@ -263,6 +313,61 @@ def test_local_os_process_mount_and_inode_observations_are_bounded_and_safe(
     inodes = run_remote(monkeypatch, "filesystem.inodes", {"path": str(tmp_path)}, timeout=3)
     assert inodes["ok"] is True
     assert inodes["data"]["total_inodes"] >= inodes["data"]["free_inodes"] >= 0
+
+
+def test_process_list_memory_order_returns_highest_rss_top_k_and_marks_output_truncation(
+    monkeypatch,
+):
+    fake_process_table(monkeypatch, [(11, 100), (22, 800), (33, 500), (44, 200), (55, 600)])
+
+    result = run_remote(
+        monkeypatch, "process.list", {"order_by": "memory_rss", "limit": 3}, timeout=5
+    )
+
+    assert result["ok"] is True
+    assert [item["pid"] for item in result["data"]["processes"]] == [22, 55, 33]
+    assert [item["rss_bytes"] for item in result["data"]["processes"]] == [
+        800 * os.sysconf("SC_PAGE_SIZE"),
+        600 * os.sysconf("SC_PAGE_SIZE"),
+        500 * os.sysconf("SC_PAGE_SIZE"),
+    ]
+    assert result["data"]["truncated"] is True
+    assert result["data"]["scan_truncated"] is False
+    assert result["data"]["inventory_complete"] is False
+    assert result["data"]["scanned_processes"] == 5
+    assert result["data"]["command_lines_included"] is False
+
+    fake_process_table(monkeypatch, [(202, 400), (201, 400), (203, 100)])
+    tied = run_remote(
+        monkeypatch, "process.list", {"order_by": "memory_rss", "limit": 2}, timeout=5
+    )
+    assert [item["pid"] for item in tied["data"]["processes"]] == [201, 202]
+
+
+def test_process_list_pid_order_and_process_tree_report_incomplete_scans(monkeypatch):
+    fake_process_table(monkeypatch, [(30, 300), (10, 100), (20, 200)])
+    pid_order = run_remote(monkeypatch, "process.list", {"limit": 2}, timeout=5)
+    assert [item["pid"] for item in pid_order["data"]["processes"]] == [10, 20]
+    assert pid_order["data"]["truncated"] is True
+    assert pid_order["data"]["scan_truncated"] is False
+    assert pid_order["data"]["inventory_complete"] is False
+
+    fake_process_table(monkeypatch, [(100, 64)], truncate_scan=True)
+    tree = run_remote(
+        monkeypatch,
+        "process.tree",
+        {"pid": 100, "max_depth": 2, "max_nodes": 5},
+        timeout=5,
+    )
+    assert tree["ok"] is True
+    assert [item["pid"] for item in tree["data"]["processes"]] == [100]
+    assert tree["data"]["truncated"] is True
+    assert tree["data"]["scan_truncated"] is True
+    assert tree["data"]["inventory_complete"] is False
+
+    missing = run_remote(monkeypatch, "process.inspect", {"pid": 999999}, timeout=3)
+    assert missing["ok"] is False
+    assert missing["error"] == "process_unavailable"
 
 
 def test_os_release_metadata_is_parsed_as_data_not_executed(monkeypatch, tmp_path: Path):
