@@ -57,7 +57,48 @@ def populated_source(tmp_path: Path) -> tuple[Path, str]:
         }
     )
     manager.link_investigation(incident_id, investigation_id, [], [])
+    store.create_plan(
+        {
+            "plan_id": "pending-approval-plan",
+            "plan_hash": "pending-hash",
+            "created_at": "synthetic",
+            "status": "approval_required",
+        }
+    )
+    store.create_approval("pending-approval-plan", "pending-hash", "offline", "synthetic", 3600)
+    store.create_plan(
+        {
+            "plan_id": "running-execution-plan",
+            "plan_hash": "running-hash",
+            "created_at": "synthetic",
+            "status": "ready",
+        }
+    )
+    store.start_execution("running-execution", "running-execution-plan", "synthetic")
     return source, incident_id
+
+
+def seed_deleted_step_result(source: Path) -> None:
+    """Leave application rows unchanged while advancing AUTOINCREMENT state."""
+    with closing(sqlite3.connect(source)) as db:
+        cursor = db.execute(
+            """INSERT INTO step_results
+               (execution_id,target,phase,step_id,action,status,started_at,finished_at,evidence_json)
+               VALUES(?,?,?,?,?,?,?,?,?)""",
+            (
+                "running-execution",
+                "fixture",
+                "diagnostic",
+                "temporary",
+                "fixture.check",
+                "succeeded",
+                "now",
+                "now",
+                "{}",
+            ),
+        )
+        db.execute("DELETE FROM step_results WHERE id=?", (cursor.lastrowid,))
+        db.commit()
 
 
 def test_wal_active_backup_preserves_incident_links_and_audit(tmp_path: Path) -> None:
@@ -77,7 +118,7 @@ def test_wal_active_backup_preserves_incident_links_and_audit(tmp_path: Path) ->
             "status": "PASS",
             "reason_code": "backup_created",
             "schema_version": 4,
-            "audit_events": 4,
+            "audit_events": 8,
             "audit_empty": False,
         }
     assert backup.stat().st_mode & 0o777 == 0o600
@@ -90,6 +131,16 @@ def test_wal_active_backup_preserves_incident_links_and_audit(tmp_path: Path) ->
             == "WAL committed state"
         )
         assert db.execute("SELECT COUNT(*) FROM incident_investigations").fetchone()[0] == 1
+        assert db.execute("SELECT COUNT(*) FROM approvals WHERE used_at IS NULL").fetchone()[0] == 1
+        assert db.execute("SELECT status FROM executions").fetchone()[0] == "running"
+    staging_digest = hashlib.sha256(backup.read_bytes()).hexdigest()
+    review = state_backup.review_staging(backup)
+    assert review["status"] == "PASS"
+    assert review["review"]["incidents"]["NEW"] == 1
+    assert review["review"]["investigations"]["failed"] == 1
+    assert review["review"]["approvals"]["unused"] == 1
+    assert review["review"]["executions"]["running"] == 1
+    assert hashlib.sha256(backup.read_bytes()).hexdigest() == staging_digest
     assert not list(source.parent.glob("*.partial-*"))
 
 
@@ -148,6 +199,273 @@ def test_missing_source_does_not_create_database(tmp_path: Path) -> None:
         "reason_code": "file_missing",
     }
     assert not source.exists() and not backup.exists()
+
+
+def test_rehearsal_validates_copy_and_returns_sanitized_equivalence(tmp_path: Path) -> None:
+    source, incident_id = populated_source(tmp_path)
+    backup = source.parent / "backup.sqlite3"
+    staging = source.parent / "staging.sqlite3"
+    assert state_backup.create_backup(source, backup)["status"] == "PASS"
+    source_digest = hashlib.sha256(backup.read_bytes()).hexdigest()
+    result = state_backup.rehearse_restore(backup, staging)
+    assert result["status"] == "PASS"
+    assert result["reason_code"] == "restore_rehearsed"
+    assert result["schema_version"] == 4
+    assert result["data_match"] is True
+    assert result["logical_sha256"] == state_backup._logical_assertions(backup)["logical_sha256"]
+    assert result["row_counts"]["incidents"] == 1
+    assert result["row_counts"]["incident_investigations"] == 1
+    assert result["row_counts"]["approvals"] == 1
+    assert result["row_counts"]["executions"] == 1
+    assert result["review"]["incidents"]["NEW"] == 1
+    assert result["review"]["approvals"]["unused"] == 1
+    assert result["review"]["executions"]["running"] == 1
+    assert staging.stat().st_mode & 0o777 == 0o600
+    assert hashlib.sha256(backup.read_bytes()).hexdigest() == source_digest
+    assert not list(source.parent.glob(".staging.sqlite3.rehearsal-*"))
+    assert incident_id not in json.dumps(result)
+    assert str(tmp_path) not in json.dumps(result)
+    with closing(sqlite3.connect(state_backup._uri(staging, immutable=True), uri=True)) as db:
+        db.row_factory = sqlite3.Row
+        assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert db.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert SQLiteStore.verify_audit_chain_connection(db) == (True, result["audit_events"])
+
+
+def test_rehearsal_accepts_empty_audit_state(tmp_path: Path) -> None:
+    directory = private_dir(tmp_path)
+    source = directory / "empty.sqlite3"
+    SQLiteStore(source)
+    backup = directory / "empty-backup.sqlite3"
+    stage = directory / "empty-stage.sqlite3"
+    assert state_backup.create_backup(source, backup)["status"] == "PASS"
+    result = state_backup.rehearse_restore(backup, stage)
+    assert result["status"] == "PASS"
+    assert result["audit_events"] == 0
+    assert result["review"]["approvals"]["unused"] == 0
+
+
+def test_logical_assertions_include_sqlite_sequence_counters(tmp_path: Path) -> None:
+    source, _ = populated_source(tmp_path)
+    seed_deleted_step_result(source)
+    backup = source.parent / "sequence-backup.sqlite3"
+    copy = source.parent / "sequence-copy.sqlite3"
+    assert state_backup.create_backup(source, backup)["status"] == "PASS"
+    state_backup._copy(backup, copy, immutable_source=True)
+
+    with closing(sqlite3.connect(copy)) as db:
+        db.execute("UPDATE sqlite_sequence SET seq=seq+100 WHERE name='step_results'")
+        db.commit()
+    with closing(sqlite3.connect(state_backup._uri(backup, immutable=True), uri=True)) as original:
+        with closing(sqlite3.connect(state_backup._uri(copy, immutable=True), uri=True)) as changed:
+            assert (
+                original.execute("SELECT * FROM step_results").fetchall()
+                == changed.execute("SELECT * FROM step_results").fetchall()
+            )
+            assert (
+                original.execute(
+                    "SELECT name,seq FROM sqlite_sequence WHERE name='step_results'"
+                ).fetchone()
+                != changed.execute(
+                    "SELECT name,seq FROM sqlite_sequence WHERE name='step_results'"
+                ).fetchone()
+            )
+
+    original_assertions = state_backup._logical_assertions(backup)
+    changed_assertions = state_backup._logical_assertions(copy)
+    assert (
+        original_assertions["row_counts"]["step_results"]
+        == changed_assertions["row_counts"]["step_results"]
+    )
+    assert original_assertions["row_counts"]["sqlite_sequence"] == 1
+    assert original_assertions["logical_sha256"] != changed_assertions["logical_sha256"]
+
+
+def test_rehearsal_rejects_staging_autoincrement_counter_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, _ = populated_source(tmp_path)
+    seed_deleted_step_result(source)
+    backup = source.parent / "sequence-backup.sqlite3"
+    staging = source.parent / "sequence-staging.sqlite3"
+    assert state_backup.create_backup(source, backup)["status"] == "PASS"
+    original_copy = state_backup._copy
+
+    def copy_with_counter_drift(
+        source_path: Path, temporary: Path, *, immutable_source: bool = False
+    ) -> None:
+        original_copy(source_path, temporary, immutable_source=immutable_source)
+        with closing(sqlite3.connect(temporary)) as db:
+            db.execute("UPDATE sqlite_sequence SET seq=seq+100 WHERE name='step_results'")
+            db.commit()
+
+    monkeypatch.setattr(state_backup, "_copy", copy_with_counter_drift)
+    assert state_backup.rehearse_restore(backup, staging) == {
+        "status": "FAIL",
+        "reason_code": "staging_mismatch",
+    }
+    assert not staging.exists()
+    assert not list(source.parent.glob(".sequence-staging.sqlite3.rehearsal-*"))
+
+
+def test_rehearsal_rejects_unrecognized_schema_at_version_four(tmp_path: Path) -> None:
+    source, _ = populated_source(tmp_path)
+    backup = source.parent / "backup.sqlite3"
+    stage = source.parent / "stage.sqlite3"
+    assert state_backup.create_backup(source, backup)["status"] == "PASS"
+    with closing(sqlite3.connect(backup)) as db:
+        db.execute("CREATE TABLE unexpected_table (value TEXT)")
+        db.commit()
+    assert state_backup.verify_backup(backup) == {
+        "status": "FAIL",
+        "reason_code": "schema_mismatch",
+    }
+    assert state_backup.rehearse_restore(backup, stage) == {
+        "status": "FAIL",
+        "reason_code": "source_schema_mismatch",
+    }
+    assert not stage.exists()
+
+
+@pytest.mark.parametrize("mutation", ["corrupt", "tampered_audit", "wrong_schema"])
+def test_rehearsal_rejects_invalid_backup_before_stage_creation(
+    tmp_path: Path, mutation: str
+) -> None:
+    source, _ = populated_source(tmp_path)
+    backup = source.parent / "invalid-backup.sqlite3"
+    assert state_backup.create_backup(source, backup)["status"] == "PASS"
+    if mutation == "corrupt":
+        backup.write_bytes(b"invalid")
+    else:
+        with closing(sqlite3.connect(backup)) as db:
+            if mutation == "tampered_audit":
+                db.execute("UPDATE audit_events SET payload_json='{}' WHERE sequence=1")
+            else:
+                db.execute("PRAGMA user_version=3")
+            db.commit()
+    stage = source.parent / "stage.sqlite3"
+    result = state_backup.rehearse_restore(backup, stage)
+    assert result["status"] == "FAIL"
+    assert not stage.exists()
+    assert not list(source.parent.glob(".stage.sqlite3.rehearsal-*"))
+
+
+def test_rehearsal_rejects_existing_alias_symlink_and_unsafe_path(tmp_path: Path) -> None:
+    source, _ = populated_source(tmp_path)
+    backup = source.parent / "backup.sqlite3"
+    assert state_backup.create_backup(source, backup)["status"] == "PASS"
+    existing = source.parent / "existing-stage.sqlite3"
+    existing.write_bytes(b"preserve")
+    existing.chmod(0o600)
+    assert state_backup.rehearse_restore(backup, existing)["reason_code"] == "destination_exists"
+    assert existing.read_bytes() == b"preserve"
+    assert (
+        state_backup.rehearse_restore(backup, backup)["reason_code"] == "source_destination_alias"
+    )
+    hardlink = source.parent / "backup-hardlink.sqlite3"
+    os.link(backup, hardlink)
+    assert (
+        state_backup.rehearse_restore(backup, hardlink)["reason_code"] == "source_destination_alias"
+    )
+    symlink = source.parent / "stage-link.sqlite3"
+    symlink.symlink_to(existing)
+    assert state_backup.rehearse_restore(backup, symlink)["reason_code"] == "destination_exists"
+    assert (
+        state_backup.rehearse_restore(backup, source.parent / ".." / "escape.sqlite3")[
+            "reason_code"
+        ]
+        == "unsafe_path"
+    )
+
+
+def test_rehearsal_rejects_symlinked_parent_and_broad_parent(tmp_path: Path) -> None:
+    source, _ = populated_source(tmp_path)
+    backup = source.parent / "backup.sqlite3"
+    assert state_backup.create_backup(source, backup)["status"] == "PASS"
+    link_parent = tmp_path / "parent-link"
+    link_parent.symlink_to(source.parent, target_is_directory=True)
+    assert (
+        state_backup.rehearse_restore(backup, link_parent / "stage.sqlite3")["reason_code"]
+        == "unsafe_parent"
+    )
+    broad_parent = tmp_path / "broad"
+    broad_parent.mkdir(mode=0o700)
+    broad_parent.chmod(0o750)
+    assert (
+        state_backup.rehearse_restore(backup, broad_parent / "stage.sqlite3")["reason_code"]
+        == "unsafe_parent"
+    )
+
+
+def test_rehearsal_copy_interruption_cleans_only_its_partial(tmp_path: Path, monkeypatch) -> None:
+    source, _ = populated_source(tmp_path)
+    backup = source.parent / "backup.sqlite3"
+    stage = source.parent / "stage.sqlite3"
+    assert state_backup.create_backup(source, backup)["status"] == "PASS"
+    source_digest = hashlib.sha256(backup.read_bytes()).hexdigest()
+    unrelated = source.parent / ".stage.sqlite3.rehearsal-unrelated"
+    unrelated.write_bytes(b"keep")
+
+    def interrupted(_source, temporary, **_kwargs):
+        temporary.write_bytes(b"partial")
+        Path(str(temporary) + "-journal").write_bytes(b"partial journal")
+        raise sqlite3.OperationalError("sensitive internal detail")
+
+    monkeypatch.setattr(state_backup, "_copy", interrupted)
+    result = state_backup.rehearse_restore(backup, stage)
+    assert result == {"status": "UNKNOWN", "reason_code": "staging_interrupted"}
+    assert not stage.exists()
+    assert unrelated.read_bytes() == b"keep"
+    assert hashlib.sha256(backup.read_bytes()).hexdigest() == source_digest
+    assert list(source.parent.glob(".stage.sqlite3.rehearsal-*")) == [unrelated]
+    assert not list(source.parent.glob(".stage.sqlite3.rehearsal-*-journal"))
+
+
+def test_rehearsal_rejects_copy_mismatch_without_publish(tmp_path: Path, monkeypatch) -> None:
+    source, _ = populated_source(tmp_path)
+    backup = source.parent / "backup.sqlite3"
+    stage = source.parent / "stage.sqlite3"
+    assert state_backup.create_backup(source, backup)["status"] == "PASS"
+    original = state_backup._logical_assertions
+    calls = 0
+
+    def mismatch(path):
+        nonlocal calls
+        calls += 1
+        assertions = original(path)
+        if calls == 2:
+            return assertions | {"logical_sha256": "0" * 64}
+        return assertions
+
+    monkeypatch.setattr(state_backup, "_logical_assertions", mismatch)
+    assert state_backup.rehearse_restore(backup, stage) == {
+        "status": "FAIL",
+        "reason_code": "staging_mismatch",
+    }
+    assert not stage.exists()
+    assert not list(source.parent.glob(".stage.sqlite3.rehearsal-*"))
+
+
+def test_rehearsal_removes_its_publish_if_directory_sync_fails(tmp_path: Path, monkeypatch) -> None:
+    source, _ = populated_source(tmp_path)
+    backup = source.parent / "backup.sqlite3"
+    stage = source.parent / "stage.sqlite3"
+    assert state_backup.create_backup(source, backup)["status"] == "PASS"
+    original_fsync = state_backup.os.fsync
+
+    def fail_sync(fd):
+        if stage.exists() and fd not in {0, 1, 2}:
+            raise OSError("private sync error")
+        return original_fsync(fd)
+
+    monkeypatch.setattr(state_backup.os, "fsync", fail_sync)
+    assert state_backup.rehearse_restore(backup, stage) == {
+        "status": "UNKNOWN",
+        "reason_code": "staging_interrupted",
+    }
+    assert not stage.exists()
+    assert not list(source.parent.glob(".stage.sqlite3.rehearsal-*"))
 
 
 @pytest.mark.parametrize("mutation", ["corrupt", "schema", "audit"])
@@ -234,6 +552,7 @@ def test_interrupted_backup_cleans_partial_without_touching_source(
 
     def interrupted(_source, temporary):
         temporary.write_bytes(b"incomplete private data")
+        Path(str(temporary) + "-wal").write_bytes(b"partial WAL")
         raise sqlite3.OperationalError("private interruption detail")
 
     monkeypatch.setattr(state_backup, "_copy", interrupted)
@@ -244,6 +563,7 @@ def test_interrupted_backup_cleans_partial_without_touching_source(
     assert not output.exists()
     assert source.read_bytes() == before
     assert not list(source.parent.glob(".snapshot.sqlite3.partial-*"))
+    assert not list(source.parent.glob(".snapshot.sqlite3.partial-*-wal"))
 
 
 def test_cli_json_help_and_exit_codes(tmp_path: Path) -> None:
@@ -253,12 +573,39 @@ def test_cli_json_help_and_exit_codes(tmp_path: Path) -> None:
     help_result = runner.invoke(app, ["state", "--help"])
     assert help_result.exit_code == 0
     assert "verify-backup" in help_result.output
+    assert "rehearse-restore" in help_result.output
+    assert "review-staging" in help_result.output
     created = runner.invoke(app, ["--db", str(source), "state", "backup", "--output", str(backup)])
     assert created.exit_code == 0, created.output
     assert json.loads(created.output)["status"] == "PASS"
     verified = runner.invoke(app, ["state", "verify-backup", str(backup)])
     assert verified.exit_code == 0
     assert json.loads(verified.output)["status"] == "PASS"
+    active_db = source.parent / "must-not-be-created.sqlite3"
+    stage = source.parent / "stage.sqlite3"
+    rehearsed = runner.invoke(
+        app,
+        [
+            "--db",
+            str(active_db),
+            "state",
+            "rehearse-restore",
+            str(backup),
+            "--output",
+            str(stage),
+        ],
+    )
+    assert rehearsed.exit_code == 0, rehearsed.output
+    result = json.loads(rehearsed.output)
+    assert result["status"] == "PASS" and result["data_match"] is True
+    assert str(tmp_path) not in rehearsed.output
+    assert not active_db.exists()
+    before_review = hashlib.sha256(stage.read_bytes()).hexdigest()
+    reviewed = runner.invoke(app, ["state", "review-staging", str(stage)])
+    assert reviewed.exit_code == 0
+    assert json.loads(reviewed.output)["review"]["approvals"]["unused"] == 1
+    assert hashlib.sha256(stage.read_bytes()).hexdigest() == before_review
+    assert not active_db.exists()
     existing = runner.invoke(app, ["--db", str(source), "state", "backup", "--output", str(backup)])
     assert existing.exit_code == 1
     assert json.loads(existing.output) == {"status": "FAIL", "reason_code": "destination_exists"}
