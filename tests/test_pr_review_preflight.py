@@ -40,6 +40,12 @@ def test_pending_check_is_not_pass():
     assert result["ci_status"] == "PENDING_OR_UNKNOWN"
 
 
+@pytest.mark.parametrize("conclusion", ["skipped", "neutral", None])
+def test_non_success_checks_cannot_pass(conclusion):
+    result = MODULE.review(payload([{"status": "completed", "conclusion": conclusion}]))
+    assert result["ci_status"] == "PENDING_OR_UNKNOWN"
+
+
 def test_successful_checks_pass_metadata_only():
     result = MODULE.review(payload([{"status": "completed", "conclusion": "success"}]))
     assert result["ci_status"] == "PASS"
