@@ -671,6 +671,7 @@ class SQLiteStore:
                 set(proposal) == timeout_keys
                 and proposal.get("proposal_version") == 1
                 and proposal.get("outcome") == "unavailable"
+                and reason_code == "provider_timeout"
                 and proposal.get("failure_stage") == "proposal"
                 and isinstance(timeout_duration, (int, float))
                 and not isinstance(timeout_duration, bool)

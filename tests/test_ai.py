@@ -4,6 +4,7 @@ import json
 import sqlite3
 import threading
 import urllib.error
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from runbookos.ai import (
 )
 from runbookos.cli import app
 from runbookos.errors import ConfigurationError, PolicyDenied, RunbookOSError
+from runbookos.incidents import IncidentStore, parse_alert
 from runbookos.store import SQLiteStore
 
 
@@ -200,6 +202,145 @@ def test_investigation_runs_only_catalog_readonly_diagnostics_and_stores_refs(
     rows = SQLiteStore(paths.database).investigations()
     assert rows[0]["result"]["incident_sha256"] == result["incident_sha256"]
     assert "intermittent" not in json.dumps(rows[0])
+    assert SQLiteStore(paths.database).verify_audit_chain()[0]
+
+
+def test_proposal_timeout_flows_through_cli_with_sanitized_duration(
+    tmp_path: Path, key_material, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from runbookos import cli as cli_module
+
+    paths = write_config_tree(tmp_path, remediation=True)
+    fake_ssh(
+        tmp_path,
+        monkeypatch,
+        {"ok": True, "data": {"unit": "nginx.service", "active": True}, "error": None},
+    )
+    incident_store = IncidentStore(SQLiteStore(paths.database))
+    alert = parse_alert(
+        json.dumps(
+            {
+                "alert_id": "proposal-timeout-e2e",
+                "source": "test-monitor",
+                "event_timestamp": datetime.now(UTC).isoformat(),
+                "severity": "error",
+                "target_alias": "test-web",
+                "service": "nginx",
+                "category": "service",
+                "summary": "Synthetic timeout integration test",
+                "fingerprint": "proposal-timeout-e2e-fingerprint",
+                "metadata": {},
+            }
+        ).encode()
+    )
+    incident_id = incident_store.ingest(alert)["incident_id"]
+    incident_store.transition(incident_id, "ACKNOWLEDGED", "test-operator", "acknowledged")
+    incident_store.mark_investigating(incident_id, "test-operator")
+
+    diagnostic_runbook = tmp_path / "diagnostic.yml"
+    diagnostic_runbook.write_text(
+        "api_version: runbookos/v1\n"
+        "kind: Runbook\n"
+        "metadata:\n"
+        "  id: synthetic-timeout-diagnostic\n"
+        "  name: Synthetic timeout diagnostic\n"
+        "  description: Read-only test diagnostic.\n"
+        "  risk: low\n"
+        "targets: [test-web]\n"
+        "steps:\n"
+        "  - id: check-service\n"
+        "    action: systemd.is_active\n"
+        "    with: {unit: nginx.service}\n"
+        "    verify: [{path: data.active, operator: is_true}]\n",
+        encoding="utf-8",
+    )
+    config, config_dir = make_config(diagnostic_runbook)
+
+    def assessment(calls):
+        refs = json.loads(calls[-1][1])["evidence_refs"]
+        return {
+            "reply_version": 2,
+            "category": "service_failure",
+            "confidence": 0.8,
+            "evidence_ids": refs,
+            "reason": "The registered service check reports an inactive service.",
+            "abstain": False,
+            "overall_uncertainty": 0.2,
+        }
+
+    def timeout(_calls):
+        raise ProviderRequestTimeout(120.125)
+
+    provider = SequenceProvider([{"diagnostic_ids": ["web_health"]}, assessment, timeout])
+    result = IncidentInvestigator(paths, config, config_dir, provider).investigate(
+        "Synthetic service failure", incident_id=incident_id
+    )
+    assert result["status"] == "succeeded"
+    investigation_id = result["investigation_id"]
+    evidence_refs = [item["ref"] for item in result["verified_evidence"]]
+    execution_ids = sorted({ref.split(":", 1)[0] for ref in evidence_refs})
+    incident_store.link_investigation(incident_id, investigation_id, execution_ids, evidence_refs)
+
+    ai_config = tmp_path / "investigation.yml"
+    ai_config.write_text(yaml.safe_dump(config.model_dump(mode="json"), sort_keys=False))
+    candidates_file = tmp_path / "candidates.yml"
+    candidates_file.write_text(
+        "schema_version: 1\n"
+        "candidates:\n"
+        "  - action_id: systemd.restart\n"
+        "    target_ref: fixture-web\n"
+        "    target_name: test-web\n"
+        "    arguments: {unit: nginx.service}\n"
+        "    required_evidence_actions: [systemd.is_active]\n"
+        "    compatible_categories: [service_failure]\n"
+    )
+    monkeypatch.setattr(cli_module, "build_provider", lambda _provider_config: provider)
+    root_args = [
+        "--inventory",
+        str(paths.inventory),
+        "--policy",
+        str(paths.policy),
+        "--ssh-profiles",
+        str(paths.ssh_profiles),
+        "--db",
+        str(paths.database),
+    ]
+    cli_result = CliRunner().invoke(
+        app,
+        root_args
+        + [
+            "incidents",
+            "propose-remediation",
+            incident_id,
+            "--investigation",
+            investigation_id,
+            "--ai-config",
+            str(ai_config),
+            "--candidates",
+            str(candidates_file),
+        ],
+    )
+    assert cli_result.exit_code == 0, cli_result.output
+    response = json.loads(cli_result.output)
+    assert response == {
+        "status": "rejected",
+        "reason_code": "provider_timeout",
+        "request_metadata": {
+            "failure_stage": "proposal",
+            "duration_seconds": 120.125,
+        },
+    }
+    assert len(provider.calls) == 3  # selection, assessment, and one proposal; no retry
+    persisted = SQLiteStore(paths.database).remediation_proposals(incident_id)
+    assert len(persisted) == 1
+    assert persisted[0]["reason_code"] == "provider_timeout"
+    assert persisted[0]["proposal"] == {
+        "proposal_version": 1,
+        "outcome": "unavailable",
+        "failure_stage": "proposal",
+        "duration_seconds": 120.125,
+    }
+    assert "private" not in json.dumps(persisted)
     assert SQLiteStore(paths.database).verify_audit_chain()[0]
 
 

@@ -71,6 +71,25 @@ def test_rejected_proposal_persists_only_safe_timeout_metadata(tmp_path):
     assert store.verify_audit_chain() == (True, 2)
 
 
+def test_timeout_metadata_requires_provider_timeout_reason_code(tmp_path):
+    store, incident_id, investigation_id = linked_store(tmp_path)
+    with pytest.raises(ConfigurationError, match="sanitized outcome"):
+        store.record_remediation_proposal(
+            incident_id=incident_id,
+            investigation_id=investigation_id,
+            proposal={
+                "proposal_version": 1,
+                "outcome": "unavailable",
+                "failure_stage": "proposal",
+                "duration_seconds": 12.5,
+            },
+            decision="rejected",
+            reason_code="proposal_contract_rejected",
+        )
+    assert store.remediation_proposals(incident_id) == []
+    assert store.verify_audit_chain() == (True, 1)
+
+
 @pytest.mark.parametrize(
     "metadata",
     [
