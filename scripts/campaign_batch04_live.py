@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 import re
 import tempfile
@@ -73,6 +74,23 @@ def jcli(*args: str, timeout: int = 300) -> dict[str, Any]:
     if result.get("exit_code") != 0:
         raise RuntimeError("RunbookOS CLI command failed")
     return json.loads(result["stdout"])
+
+
+def safe_provider_request_metadata(result: dict[str, Any]) -> dict[str, Any] | None:
+    """Keep only bounded proposal-stage timeout telemetry from CLI output."""
+    metadata = result.get("request_metadata")
+    if not isinstance(metadata, dict) or set(metadata) != {"failure_stage", "duration_seconds"}:
+        return None
+    duration = metadata.get("duration_seconds")
+    if (
+        metadata.get("failure_stage") != "proposal"
+        or isinstance(duration, bool)
+        or not isinstance(duration, (int, float))
+        or not math.isfinite(duration)
+        or not 0 <= duration <= 3600
+    ):
+        return None
+    return {"failure_stage": "proposal", "duration_seconds": round(float(duration), 3)}
 
 
 def persist(ledger: dict[str, Any]) -> None:
@@ -994,15 +1012,16 @@ def run_scenario(s: dict[str, Any], ledger: dict[str, Any]) -> dict[str, Any]:
                 check=False,
                 timeout=180,
             )
+            enforce_transport_guard(po)
+            pd = json.loads(po.get("stdout", "{}"))
             row["steps"]["proposal_transport"] = {
                 "resource_watch": {
                     k: v for k, v in po.get("resource_watch", {}).items() if k != "samples"
                 },
                 "transport_failure_component": po.get("transport_failure_component"),
                 "transport_failure_category": po.get("transport_failure_category"),
+                "request_metadata": safe_provider_request_metadata(pd),
             }
-            enforce_transport_guard(po)
-            pd = json.loads(po.get("stdout", "{}"))
             row["proposal_provider_requests"] = row.get("proposal_provider_requests", 0) + 1
             p = pd.get("proposal", {})
             val = p.get("validation", {})
