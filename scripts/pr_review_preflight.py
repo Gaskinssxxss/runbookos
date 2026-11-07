@@ -12,7 +12,6 @@ import os
 import re
 import sys
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 API_ROOT = "https://api.github.com"
@@ -90,7 +89,7 @@ def safe_text(value: object, limit: int = 120) -> str:
 
 
 def review(payload: dict) -> dict:
-    pr, files, checks = payload["pr"], payload["files"], payload["checks"]
+    files, checks = payload["files"], payload["checks"]
     findings: list[dict] = []
     ci_status = "UNKNOWN"
     if not checks:
