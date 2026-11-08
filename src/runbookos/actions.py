@@ -346,8 +346,10 @@ REGISTRY: dict[str, ActionDefinition] = {
         arguments_model=FilesystemPathArguments,
         max_timeout_seconds=3,
     ),
-    "network.interfaces": ActionDefinition("network.interfaces", True, frozenset()),
-    "network.routes": ActionDefinition("network.routes", True, frozenset()),
+    "network.interfaces": ActionDefinition(
+        "network.interfaces", True, frozenset(), max_timeout_seconds=15
+    ),
+    "network.routes": ActionDefinition("network.routes", True, frozenset(), max_timeout_seconds=15),
     "network.resolver_config": ActionDefinition("network.resolver_config", True, frozenset()),
     "network.dns_resolve": ActionDefinition(
         "network.dns_resolve",

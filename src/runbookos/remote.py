@@ -704,11 +704,23 @@ try:
         summary=cron_records(limit)
         emit(True,summary)
     elif action == "network.interfaces":
-        r=subprocess.run(["/usr/sbin/ip","-j","address","show"],capture_output=True,text=True,timeout=timeout,check=False)
-        emit(r.returncode == 0,{"interfaces":json.loads(r.stdout) if r.returncode == 0 else []},r.stderr.strip() or None)
+        output,error=bounded_stdout(["/usr/sbin/ip","-j","address","show"],min(timeout,15),65536)
+        if error is not None: emit(False,{"interfaces":[]},error,True)
+        else:
+            try:
+                interfaces=json.loads(output)
+                if not isinstance(interfaces,list): raise ValueError("invalid network inventory")
+                emit(True,{"interfaces":interfaces})
+            except (ValueError,TypeError): emit(False,{"interfaces":[]},"invalid_network_inventory",True)
     elif action == "network.routes":
-        r=subprocess.run(["/usr/sbin/ip","-j","route","show"],capture_output=True,text=True,timeout=timeout,check=False)
-        emit(r.returncode == 0,{"routes":json.loads(r.stdout) if r.returncode == 0 else []},r.stderr.strip() or None)
+        output,error=bounded_stdout(["/usr/sbin/ip","-j","route","show"],min(timeout,15),65536)
+        if error is not None: emit(False,{"routes":[]},error,True)
+        else:
+            try:
+                routes=json.loads(output)
+                if not isinstance(routes,list): raise ValueError("invalid route inventory")
+                emit(True,{"routes":routes})
+            except (ValueError,TypeError): emit(False,{"routes":[]},"invalid_route_inventory",True)
     elif action == "network.firewall_summary":
         data,error=firewall_summary(timeout)
         emit(error is None,data,error,error is not None)

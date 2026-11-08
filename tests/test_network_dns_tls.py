@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import os
 import socket
 import ssl
 import struct
@@ -438,3 +439,41 @@ def test_firewall_summary_is_read_only_and_unavailable_without_privilege(monkeyp
     assert error is None
     assert (summary["tables"], summary["chains"], summary["rules"]) == (1, 1, 1)
     assert "secret" not in json.dumps(summary)
+
+
+def test_existing_route_and_interface_inventory_uses_fixed_bounded_commands(monkeypatch, capsys):
+    calls = []
+
+    class FakeProcess:
+        def __init__(self, argv, **kwargs):
+            calls.append(argv)
+            read_fd, write_fd = os.pipe()
+            os.write(write_fd, b'[{"dst":"10.20.0.0/16"}]')
+            os.close(write_fd)
+            self.stdout = os.fdopen(read_fd, "rb", buffering=0)
+            self.returncode = 0
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return 0
+
+        def kill(self):
+            raise AssertionError("completed process must not be killed")
+
+    monkeypatch.setattr(subprocess, "Popen", FakeProcess)
+    for action, field, argv in (
+        ("network.routes", "routes", ["/usr/sbin/ip", "-j", "route", "show"]),
+        ("network.interfaces", "interfaces", ["/usr/sbin/ip", "-j", "address", "show"]),
+    ):
+        request = base64.b64encode(
+            json.dumps({"action": action, "arguments": {}, "timeout_seconds": 5}).encode()
+        ).decode()
+        monkeypatch.setattr(sys, "argv", ["remote", request])
+        exec(compile(REMOTE_SOURCE, "<network-inventory-test>", "exec"), {"__name__": "__main__"})
+        result = json.loads(capsys.readouterr().out)
+        assert result["ok"] is True
+        assert result["data"][field] == [{"dst": "10.20.0.0/16"}]
+        assert calls[-1] == argv
+        assert validate_action(action, {}).max_timeout_seconds == 15
