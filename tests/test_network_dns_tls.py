@@ -30,6 +30,7 @@ ENDPOINT = {
     "path": "/health",
     "dns_name": "service.example.test",
     "resolver_address": "10.20.30.53",
+    "local_listener": True,
 }
 
 
@@ -66,6 +67,7 @@ def test_endpoint_dns_configuration_is_fixed_and_private():
         {"resolver_address": "169.254.169.254"},
         {"resolver_address": "8.8.8.8"},
         {"dns_name": None},
+        {"local_listener": "true"},
     ):
         with pytest.raises(ValidationError):
             ProbeTarget.model_validate({**ENDPOINT, **update})
@@ -271,8 +273,15 @@ def test_dns_rejects_truncated_response_without_claiming_nxdomain(monkeypatch, c
 
 
 def test_listener_uses_only_configured_port_and_reports_absence_or_partial_scan(
-    monkeypatch, capsys
+    monkeypatch,
 ):
+    namespace = {}
+    exec(compile(REMOTE_SOURCE.split("\ntry:\n", 1)[0], "<listener-helpers>", "exec"), namespace)
+    namespace["bounded_stdout"] = lambda argv, timeout, limit: (
+        json.dumps([{"addr_info": [{"family": "inet", "local": ENDPOINT["address"]}]}]),
+        None,
+    )
+    listener = namespace["listener_snapshot"]
     original_open = open
 
     def fake_open(path, *args, **kwargs):
@@ -283,11 +292,12 @@ def test_listener_uses_only_configured_port_and_reports_absence_or_partial_scan(
         return original_open(path, *args, **kwargs)
 
     monkeypatch.setattr("builtins.open", fake_open)
-    present = remote(monkeypatch, capsys, "network.listener", timeout=3)
-    assert present["data"]["listening"] is True
-    assert present["data"]["status"] == "listening"
-    assert present["data"]["listener_count"] == 1
-    assert "address" not in present["data"]
+    present, error = listener("service_health", ENDPOINT["address"], 443, 3)
+    assert error is None
+    assert present["listening"] is True
+    assert present["status"] == "listening"
+    assert present["listener_count"] == 1
+    assert present["address_owned"] is True
     monkeypatch.setattr(
         "builtins.open",
         lambda path, *a, **kw: (
@@ -296,9 +306,10 @@ def test_listener_uses_only_configured_port_and_reports_absence_or_partial_scan(
             else original_open(path, *a, **kw)
         ),
     )
-    absent = remote(monkeypatch, capsys, "network.listener", timeout=3)
-    assert absent["data"]["listening"] is False
-    assert absent["data"]["status"] == "port_closed"
+    absent, error = listener("service_health", ENDPOINT["address"], 443, 3)
+    assert error is None
+    assert absent["listening"] is False
+    assert absent["status"] == "port_closed"
 
     monkeypatch.setattr(
         "builtins.open",
@@ -308,9 +319,10 @@ def test_listener_uses_only_configured_port_and_reports_absence_or_partial_scan(
             else original_open(path, *a, **kw)
         ),
     )
-    mismatch = remote(monkeypatch, capsys, "network.listener", timeout=3)
-    assert mismatch["data"]["status"] == "address_mismatch"
-    assert mismatch["data"]["listening"] is False
+    mismatch, error = listener("service_health", ENDPOINT["address"], 443, 3)
+    assert error is None
+    assert mismatch["status"] == "address_mismatch"
+    assert mismatch["listening"] is False
 
     monkeypatch.setattr(
         "builtins.open",
@@ -320,10 +332,146 @@ def test_listener_uses_only_configured_port_and_reports_absence_or_partial_scan(
             else original_open(path, *a, **kw)
         ),
     )
-    truncated = remote(monkeypatch, capsys, "network.listener", timeout=3)
-    assert truncated["ok"] is False
-    assert truncated["uncertain"] is True
-    assert truncated["data"]["scan_truncated"] is True
+    truncated, error = listener("service_health", ENDPOINT["address"], 443, 3)
+    assert error == "listener_scan_incomplete"
+    assert truncated["scan_truncated"] is True
+
+
+def test_listener_remote_endpoint_and_unavailable_address_inventory_are_unknown(monkeypatch):
+    namespace = {}
+    exec(compile(REMOTE_SOURCE.split("\ntry:\n", 1)[0], "<listener-helpers>", "exec"), namespace)
+    listener = namespace["listener_snapshot"]
+    namespace["bounded_stdout"] = lambda argv, timeout, limit: (
+        json.dumps([{"addr_info": [{"family": "inet", "local": "10.20.30.41"}]}]),
+        None,
+    )
+    monkeypatch.setattr("builtins.open", lambda *a, **kw: pytest.fail("remote socket scan"))
+    remote_host, error = listener("service_health", ENDPOINT["address"], 443, 3)
+    assert error is None
+    assert remote_host["status"] == "not_applicable"
+    assert remote_host["address_owned"] is False
+
+    class HealthyRemote:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+    monkeypatch.setattr(socket, "create_connection", lambda address, timeout: HealthyRemote())
+    tcp, tcp_error = namespace["probe_endpoint"](
+        "network.tcp_connect",
+        {"endpoint_id": "service_health", "_endpoint": ENDPOINT},
+        3,
+    )
+    assert tcp_error is None
+    assert tcp["tcp_connected"] is True
+    assert remote_host["status"] == "not_applicable"
+    for output, failure in ((None, "output_limit"), ("not-json", None), ("[]", None)):
+        namespace["bounded_stdout"] = lambda argv, timeout, limit: (output, failure)
+        result, error = listener("service_health", ENDPOINT["address"], 443, 3)
+        assert result["status"] in {"unknown", "not_applicable"}
+        assert result["listening"] is False
+        if output != "[]":
+            assert error == "local_address_inventory_unavailable"
+        else:
+            assert error is None
+
+
+def test_listener_plan_requires_explicit_local_scope(tmp_path):
+    paths, runbook = configured_engine(tmp_path)
+    inventory = yaml.safe_load(paths.inventory.read_text())
+    inventory["hosts"]["test-web"]["probe_targets"]["service_health"]["local_listener"] = False
+    paths.inventory.write_text(yaml.safe_dump(inventory))
+    plan = RunbookEngine(paths).plan(runbook)
+    assert plan.status == "denied"
+    assert plan.actions[2].action == "network.listener"
+    assert plan.actions[2].allowed is False
+
+
+def test_listener_remote_dispatch_rejects_unscoped_endpoint(monkeypatch, capsys):
+    rejected = remote(
+        monkeypatch,
+        capsys,
+        "network.listener",
+        {**ENDPOINT, "local_listener": False},
+        timeout=3,
+    )
+    assert rejected["ok"] is False
+    assert rejected["data"] == {}
+    assert "local listener scope denied" in rejected["error"]
+
+
+def test_cross_host_listener_dispatch_is_uncertain_without_socket_scan(monkeypatch, capsys):
+    class LocalAddresses:
+        def __init__(self, *args, **kwargs):
+            assert args[0] == ["/usr/sbin/ip", "-j", "-4", "address", "show"]
+            read_fd, write_fd = os.pipe()
+            os.write(
+                write_fd,
+                json.dumps([{"addr_info": [{"family": "inet", "local": "10.20.30.41"}]}]).encode(),
+            )
+            os.close(write_fd)
+            self.stdout = os.fdopen(read_fd, "rb")
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(subprocess, "Popen", LocalAddresses)
+    original_open = open
+
+    def no_socket_scan(path, *args, **kwargs):
+        if path == "/proc/net/tcp":
+            pytest.fail("cross-host listener scanned local sockets")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", no_socket_scan)
+    result = remote(monkeypatch, capsys, "network.listener", timeout=3)
+    assert result["ok"] is True
+    assert result["uncertain"] is True
+    assert result["data"]["status"] == "not_applicable"
+    assert result["data"]["address_owned"] is False
+
+
+@pytest.mark.parametrize(
+    ("action", "field", "value"),
+    [
+        ("network.dns_resolve", "status", "timeout"),
+        ("network.dns_resolve", "status", "resolver_unavailable"),
+        ("network.tls_certificate", "certificate_status", "timeout"),
+        ("network.tls_certificate", "certificate_status", "unavailable"),
+    ],
+)
+def test_engine_does_not_verify_uncertain_dns_or_tls_result(tmp_path, action, field, value):
+    paths, runbook = configured_engine(tmp_path)
+    definition = yaml.safe_load(runbook.read_text())
+    selected = next(step for step in definition["steps"] if step["action"] == action)
+    selected["verify"] = [{"path": f"data.{field}", "operator": "eq", "value": value}]
+    definition["steps"] = [selected]
+    runbook.write_text(yaml.safe_dump(definition))
+
+    class UncertainExecutor:
+        calls = 0
+
+        def execute(self, host, dispatched, arguments, timeout_seconds):
+            self.calls += 1
+            assert dispatched == action
+            return SSHResult(ok=True, data={field: value}, uncertain=True)
+
+    executor = UncertainExecutor()
+    engine = RunbookEngine(paths, executor=executor)
+    plan = engine.plan(runbook)
+    assert plan.status == "ready"
+    execution_id, status = engine.execute(plan.plan_id, diagnostic_only=True)
+    assert status == "unknown"
+    assert executor.calls == 1
+    step = engine.store.execution(execution_id)["steps"][0]
+    assert step["status"] == "unknown"
+    assert "assertions" not in step["evidence"]
+    assert engine.store.verify_audit_chain()[0] is True
 
 
 def test_tls_reports_verified_and_invalid_certificates_without_raw_details(monkeypatch, capsys):

@@ -9,7 +9,7 @@ def emit(ok, data=None, error=None, uncertain=False):
     print(json.dumps({"ok": ok, "data": data or {}, "error": error, "uncertain": uncertain}, separators=(",", ":")))
 def probe_endpoint(action, args, timeout):
     endpoint=args.get("_endpoint")
-    if not isinstance(endpoint,dict) or set(endpoint) not in ({"protocol","address","port","path"},{"protocol","address","port","path","dns_name","resolver_address"}): raise ValueError("invalid endpoint")
+    if not isinstance(endpoint,dict) or set(endpoint) not in ({"protocol","address","port","path"},{"protocol","address","port","path","dns_name","resolver_address"},{"protocol","address","port","path","dns_name","resolver_address","local_listener"}): raise ValueError("invalid endpoint")
     address=endpoint["address"]
     if not isinstance(address,str) or not re.fullmatch(r"[0-9]{1,3}(?:\.[0-9]{1,3}){3}",address): raise ValueError("endpoint address denied")
     ip=ipaddress.ip_address(address)
@@ -28,7 +28,9 @@ def probe_endpoint(action, args, timeout):
         name=endpoint.get("dns_name"); resolver=endpoint.get("resolver_address")
         if not valid_dns_name(name) or not valid_private_ipv4(resolver): raise ValueError("DNS endpoint configuration denied")
         return dns_query(endpoint_id,name,resolver,address,timeout)
-    if action == "network.listener": return listener_snapshot(endpoint_id,address,port,timeout)
+    if action == "network.listener":
+        if endpoint.get("local_listener") is not True: raise ValueError("local listener scope denied")
+        return listener_snapshot(endpoint_id,address,port,timeout)
     if action == "network.tls_certificate":
         name=endpoint.get("dns_name")
         if not valid_dns_name(name): raise ValueError("TLS hostname configuration denied")
@@ -183,8 +185,27 @@ def dns_query(endpoint_id,name,resolver,expected_address,timeout):
     except ValueError: data["status"]="invalid_response"; return data,None
 def listener_snapshot(endpoint_id,address,port,timeout):
     if timeout>3: raise ValueError("listener timeout denied")
-    data={"endpoint_id":endpoint_id,"port":port,"listening":False,"listener_count":0,"other_address_listeners":0,"status":"unknown","scan_truncated":False}
+    data={"endpoint_id":endpoint_id,"port":port,"scope":"observed_host_local_ipv4","address_owned":False,"listening":False,"listener_count":0,"other_address_listeners":0,"status":"unknown","scan_truncated":False}
     deadline=time.monotonic()+timeout
+    output,error=bounded_stdout(["/usr/sbin/ip","-j","-4","address","show"],timeout,65536)
+    if error is not None: return data,"local_address_inventory_unavailable"
+    try:
+        interfaces=json.loads(output)
+        if not isinstance(interfaces,list) or len(interfaces)>128: raise ValueError("invalid interface inventory")
+        owned=set()
+        for interface in interfaces:
+            if not isinstance(interface,dict) or not isinstance(interface.get("addr_info"),list) or len(interface["addr_info"])>128: raise ValueError("invalid interface inventory")
+            for entry in interface["addr_info"]:
+                if not isinstance(entry,dict) or entry.get("family")!="inet": continue
+                literal=entry.get("local")
+                if not isinstance(literal,str): raise ValueError("invalid local address")
+                owned.add(str(ipaddress.IPv4Address(literal)))
+        if address not in owned:
+            data["status"]="not_applicable"
+            return data,None
+        data["address_owned"]=True
+    except (ValueError,TypeError,KeyError): return data,"local_address_inventory_unavailable"
+    if time.monotonic()>=deadline: return data,"listener_scan_incomplete"
     try:
         count=0
         expected=socket.inet_aton(address)[::-1].hex().upper()
@@ -727,7 +748,7 @@ try:
     elif action in ("network.tcp_connect","network.reachability","http.readiness","postgresql.protocol_available","network.dns_resolve","network.listener","network.tls_certificate"):
         data,error=probe_endpoint(action,args,timeout)
         if action in ("network.tcp_connect","network.reachability","http.readiness","postgresql.protocol_available"): emit(True,data,error)
-        else: emit(error is None,data,error,error is not None or data.get("status") in ("timeout","resolver_failure","resolver_unavailable","invalid_response") or data.get("certificate_status") in ("timeout","unavailable"))
+        else: emit(error is None,data,error,error is not None or data.get("status") in ("timeout","resolver_failure","resolver_unavailable","invalid_response","not_applicable") or data.get("certificate_status") in ("timeout","unavailable"))
     else:
         emit(False,{},"action is not in the remote registry")
 except subprocess.TimeoutExpired:

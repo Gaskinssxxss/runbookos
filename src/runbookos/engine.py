@@ -298,6 +298,7 @@ class RunbookEngine:
                     probe_configured = probe_id is None or (
                         target_probe is not None
                         and target_probe.protocol in probe_protocols.get(step.action, set())
+                        and (step.action != "network.listener" or target_probe.local_listener)
                         and (
                             step.action != "network.dns_resolve"
                             or (

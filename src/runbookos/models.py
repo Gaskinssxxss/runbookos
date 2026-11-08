@@ -106,6 +106,7 @@ class ProbeTarget(StrictModel):
     path: str | None = Field(default=None, max_length=128)
     dns_name: str | None = Field(default=None, max_length=253)
     resolver_address: str | None = Field(default=None, max_length=15)
+    local_listener: bool = Field(default=False, strict=True)
 
     @field_validator("address")
     @classmethod

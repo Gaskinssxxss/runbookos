@@ -3,7 +3,7 @@ kind: Runbook
 metadata:
   id: network-dns-tls-review
   name: Bounded network, DNS and TLS review
-  description: Compares separately observed DNS, local listener, TCP and certificate signals for one inventory endpoint.
+  description: Compares DNS, outbound TCP and certificate signals for one inventory endpoint.
   risk: low
 targets: [example-web-01]
 steps:
@@ -14,10 +14,6 @@ steps:
     action: network.dns_resolve
     with: {endpoint_id: service_health}
     timeout_seconds: 5
-  - id: local-listener
-    action: network.listener
-    with: {endpoint_id: service_health}
-    timeout_seconds: 3
   - id: tcp-connectivity
     action: network.tcp_connect
     with: {endpoint_id: service_health}
