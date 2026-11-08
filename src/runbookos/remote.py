@@ -9,7 +9,7 @@ def emit(ok, data=None, error=None, uncertain=False):
     print(json.dumps({"ok": ok, "data": data or {}, "error": error, "uncertain": uncertain}, separators=(",", ":")))
 def probe_endpoint(action, args, timeout):
     endpoint=args.get("_endpoint")
-    if not isinstance(endpoint,dict) or set(endpoint) != {"protocol","address","port","path"}: raise ValueError("invalid endpoint")
+    if not isinstance(endpoint,dict) or set(endpoint) not in ({"protocol","address","port","path"},{"protocol","address","port","path","dns_name","resolver_address"}): raise ValueError("invalid endpoint")
     address=endpoint["address"]
     if not isinstance(address,str) or not re.fullmatch(r"[0-9]{1,3}(?:\.[0-9]{1,3}){3}",address): raise ValueError("endpoint address denied")
     ip=ipaddress.ip_address(address)
@@ -19,11 +19,20 @@ def probe_endpoint(action, args, timeout):
     protocol=endpoint["protocol"]
     endpoint_id=args.get("endpoint_id")
     if not isinstance(endpoint_id,str) or not re.fullmatch(r"[a-z][a-z0-9_-]{1,62}",endpoint_id): raise ValueError("endpoint ID denied")
-    expected={"network.tcp_connect":{"tcp","http","https","postgresql"},"network.reachability":{"tcp","http","https","postgresql"},"http.readiness":{"http","https"},"postgresql.protocol_available":{"postgresql"}}
+    expected={"network.tcp_connect":{"tcp","http","https","postgresql"},"network.reachability":{"tcp","http","https","postgresql"},"http.readiness":{"http","https"},"postgresql.protocol_available":{"postgresql"},"network.dns_resolve":{"tcp","http","https","postgresql"},"network.listener":{"tcp","http","https","postgresql"},"network.tls_certificate":{"https"}}
     if protocol not in expected.get(action,set()): raise ValueError("endpoint protocol denied")
     if not isinstance(timeout,int) or isinstance(timeout,bool) or not 1 <= timeout <= 10: raise ValueError("probe timeout denied")
     start=time.monotonic()
     data={"endpoint_id":endpoint_id,"address":address,"port":port,"protocol":protocol}
+    if action == "network.dns_resolve":
+        name=endpoint.get("dns_name"); resolver=endpoint.get("resolver_address")
+        if not valid_dns_name(name) or not valid_private_ipv4(resolver): raise ValueError("DNS endpoint configuration denied")
+        return dns_query(endpoint_id,name,resolver,address,timeout)
+    if action == "network.listener": return listener_snapshot(endpoint_id,address,port,timeout)
+    if action == "network.tls_certificate":
+        name=endpoint.get("dns_name")
+        if not valid_dns_name(name): raise ValueError("TLS hostname configuration denied")
+        return tls_certificate(endpoint_id,address,port,name,timeout)
     if action in ("network.tcp_connect","network.reachability"):
         try:
             with socket.create_connection((address,port),timeout=timeout): connected=True
@@ -121,6 +130,118 @@ def safe_log_message(value):
     text=re.sub(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----","[REDACTED PRIVATE KEY]",text,flags=re.S)
     text="".join(ch for ch in text if ch in "\t" or ch.isprintable())
     return text[:1024]
+def valid_private_ipv4(value):
+    try:
+        address=ipaddress.ip_address(value)
+        return isinstance(address,ipaddress.IPv4Address) and address.is_private and not (address.is_loopback or address.is_link_local or address.is_multicast or address.is_reserved or address.is_unspecified)
+    except ValueError: return False
+def valid_dns_name(value):
+    return isinstance(value,str) and len(value)<=253 and re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+",value) is not None
+def dns_query(endpoint_id,name,resolver,expected_address,timeout):
+    identifier=int.from_bytes(os.urandom(2),"big")
+    labels=name.lower().encode("ascii").split(b".")
+    question=b"".join(bytes([len(label)])+label for label in labels)+b"\0\0\1\0\1"
+    request=struct.pack("!HHHHHH",identifier,0x0100,1,0,0,0)+question
+    data={"endpoint_id":endpoint_id,"dns_name":name,"resolver_address":resolver,"expected_address":expected_address,"answers":[],"matches_expected":False,"status":"unknown"}
+    try:
+        with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as connection:
+            connection.settimeout(timeout)
+            connection.sendto(request,(resolver,53))
+            response,source=connection.recvfrom(2049)
+        if source[0]!=resolver or source[1]!=53 or len(response)>2048 or len(response)<12: raise ValueError("invalid_dns_response")
+        reply_id,flags,queries,answers,_,_=struct.unpack("!HHHHHH",response[:12])
+        if reply_id!=identifier or flags&0x8000==0 or flags&0x0200 or queries!=1 or answers>32 or response[12:12+len(question)].lower()!=question: raise ValueError("invalid_dns_response")
+        code=flags&15
+        if code==3: data["status"]="nxdomain"; return data,None
+        if code!=0: data["status"]="resolver_failure"; return data,None
+        offset=12+len(question); addresses=[]
+        for _ in range(answers):
+            if offset>=len(response): raise ValueError("invalid_dns_response")
+            if response[offset]&0xc0==0xc0:
+                if offset+2>len(response) or ((response[offset]&0x3f)<<8 | response[offset+1])!=12: raise ValueError("invalid_dns_response")
+                offset+=2
+            else:
+                owner_start=offset
+                while True:
+                    if offset>=len(response): raise ValueError("invalid_dns_response")
+                    length=response[offset]; offset+=1
+                    if length==0: break
+                    if length>63 or offset+length>len(response): raise ValueError("invalid_dns_response")
+                    offset+=length
+                if response[owner_start:offset].lower()!=question[:-4]: raise ValueError("invalid_dns_response")
+            if offset+10>len(response): raise ValueError("invalid_dns_response")
+            kind,record_class,_,size=struct.unpack("!HHIH",response[offset:offset+10]); offset+=10
+            if offset+size>len(response): raise ValueError("invalid_dns_response")
+            if kind==1 and record_class==1 and size==4: addresses.append(socket.inet_ntoa(response[offset:offset+4]))
+            offset+=size
+        data["answers"]=sorted(set(addresses))[:32]
+        data["matches_expected"]=expected_address in data["answers"]
+        data["status"]="matched" if data["matches_expected"] else "mismatch" if data["answers"] else "no_a_record"
+        return data,None
+    except (socket.timeout,TimeoutError): data["status"]="timeout"; return data,None
+    except OSError: data["status"]="resolver_unavailable"; return data,None
+    except ValueError: data["status"]="invalid_response"; return data,None
+def listener_snapshot(endpoint_id,address,port,timeout):
+    if timeout>3: raise ValueError("listener timeout denied")
+    data={"endpoint_id":endpoint_id,"port":port,"listening":False,"listener_count":0,"other_address_listeners":0,"status":"unknown","scan_truncated":False}
+    deadline=time.monotonic()+timeout
+    try:
+        count=0
+        expected=socket.inet_aton(address)[::-1].hex().upper()
+        with open("/proc/net/tcp",encoding="ascii") as stream:
+            for line in stream:
+                count+=1
+                if count>4096 or time.monotonic()>=deadline: data["scan_truncated"]=True; return data,"listener_scan_incomplete"
+                fields=line.split()
+                if len(fields)<4 or fields[3]!="0A": continue
+                candidate=fields[1].split(":")
+                if len(candidate)!=2 or int(candidate[1],16)!=port: continue
+                if candidate[0].upper() in (expected,"00000000"): data["listener_count"]+=1
+                else: data["other_address_listeners"]+=1
+        data["listening"]=data["listener_count"]>0
+        data["status"]="listening" if data["listening"] else "address_mismatch" if data["other_address_listeners"] else "port_closed"
+        return data,None
+    except (OSError,ValueError): return data,"listener_inventory_unavailable"
+def tls_certificate(endpoint_id,address,port,name,timeout):
+    data={"endpoint_id":endpoint_id,"dns_name":name,"certificate_status":"unknown","chain_valid":False,"hostname_valid":False,"expires_at":None,"days_remaining":None}
+    try:
+        deadline=time.monotonic()+timeout
+        context=ssl.create_default_context()
+        with socket.create_connection((address,port),timeout=timeout) as connection:
+            remaining=deadline-time.monotonic()
+            if remaining<=0: raise TimeoutError()
+            connection.settimeout(remaining)
+            with context.wrap_socket(connection,server_hostname=name) as secure:
+                certificate=secure.getpeercert()
+        expiry=certificate.get("notAfter")
+        if not isinstance(expiry,str): return data,"certificate_metadata_unavailable"
+        remaining=int((ssl.cert_time_to_seconds(expiry)-time.time())//86400)
+        data.update({"certificate_status":"valid" if remaining>=0 else "expired","chain_valid":True,"hostname_valid":True,"expires_at":expiry[:32],"days_remaining":remaining})
+        return data,None
+    except ssl.SSLCertVerificationError as exc:
+        code=getattr(exc,"verify_code",None)
+        data["certificate_status"]="expired" if code==10 else "hostname_mismatch" if code==62 else "invalid_chain" if code in (20,21) else "invalid_certificate"
+        return data,None
+    except (socket.timeout,TimeoutError): data["certificate_status"]="timeout"; return data,None
+    except (OSError,ssl.SSLError,ValueError): data["certificate_status"]="unavailable"; return data,None
+def firewall_summary(timeout):
+    data={"backend":"nftables","status":"unavailable","tables":0,"chains":0,"rules":0,"raw_rules_included":False}
+    if timeout>5: raise ValueError("firewall timeout denied")
+    output,error=bounded_stdout(["/usr/sbin/nft","-j","list","ruleset"],timeout,65536)
+    if error is not None: return data,"firewall_inspection_unavailable"
+    try:
+        parsed=json.loads(output)
+        entries=parsed["nftables"]
+        if not isinstance(entries,list) or len(entries)>4096: raise ValueError("invalid ruleset")
+        for entry in entries:
+            if not isinstance(entry,dict) or len(entry)!=1: raise ValueError("invalid ruleset")
+            kind=next(iter(entry))
+            if kind=="table": data["tables"]+=1
+            elif kind=="chain": data["chains"]+=1
+            elif kind=="rule": data["rules"]+=1
+        data["status"]="available"
+        return data,None
+    except (ValueError,KeyError,TypeError): return data,"firewall_inventory_invalid"
 def proc_record(pid):
     if isinstance(pid,bool) or not isinstance(pid,int) or not 1 <= pid <= 4194304: return None
     try:
@@ -588,9 +709,13 @@ try:
     elif action == "network.routes":
         r=subprocess.run(["/usr/sbin/ip","-j","route","show"],capture_output=True,text=True,timeout=timeout,check=False)
         emit(r.returncode == 0,{"routes":json.loads(r.stdout) if r.returncode == 0 else []},r.stderr.strip() or None)
-    elif action in ("network.tcp_connect","network.reachability","http.readiness","postgresql.protocol_available"):
+    elif action == "network.firewall_summary":
+        data,error=firewall_summary(timeout)
+        emit(error is None,data,error,error is not None)
+    elif action in ("network.tcp_connect","network.reachability","http.readiness","postgresql.protocol_available","network.dns_resolve","network.listener","network.tls_certificate"):
         data,error=probe_endpoint(action,args,timeout)
-        emit(True,data,error)
+        if action in ("network.tcp_connect","network.reachability","http.readiness","postgresql.protocol_available"): emit(True,data,error)
+        else: emit(error is None,data,error,error is not None or data.get("status") in ("timeout","resolver_failure","resolver_unavailable","invalid_response") or data.get("certificate_status") in ("timeout","unavailable"))
     else:
         emit(False,{},"action is not in the remote registry")
 except subprocess.TimeoutExpired:

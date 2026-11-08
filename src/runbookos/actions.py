@@ -349,6 +349,33 @@ REGISTRY: dict[str, ActionDefinition] = {
     "network.interfaces": ActionDefinition("network.interfaces", True, frozenset()),
     "network.routes": ActionDefinition("network.routes", True, frozenset()),
     "network.resolver_config": ActionDefinition("network.resolver_config", True, frozenset()),
+    "network.dns_resolve": ActionDefinition(
+        "network.dns_resolve",
+        True,
+        frozenset({"endpoint_id"}),
+        arguments_model=ProbeArguments,
+        max_timeout_seconds=5,
+    ),
+    "network.listener": ActionDefinition(
+        "network.listener",
+        True,
+        frozenset({"endpoint_id"}),
+        arguments_model=ProbeArguments,
+        max_timeout_seconds=3,
+    ),
+    "network.tls_certificate": ActionDefinition(
+        "network.tls_certificate",
+        True,
+        frozenset({"endpoint_id"}),
+        arguments_model=ProbeArguments,
+        max_timeout_seconds=10,
+    ),
+    "network.firewall_summary": ActionDefinition(
+        "network.firewall_summary",
+        True,
+        frozenset(),
+        max_timeout_seconds=5,
+    ),
     "network.tcp_connect": ActionDefinition(
         "network.tcp_connect",
         True,

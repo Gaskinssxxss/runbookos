@@ -26,7 +26,13 @@ hosts:
       - filesystem.inodes
       - network.interfaces
       - network.routes
+      - network.dns_resolve
+      - network.listener
+      - network.tls_certificate
+      # network.firewall_summary requires separately reviewed local read access.
     remediation_actions: []
+    # The matching probe_targets entry must be added to private inventory first.
+    allowed_probe_targets: [service_health]
     allowed_units:
       - nginx.service
   example-app-01:
