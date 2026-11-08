@@ -7,6 +7,11 @@ hosts:
     role: web-server
     ssh_profile: default
     host_key_alias: example-web-01
+    # Add reviewed private storage targets before enabling storage diagnostics:
+    # storage_targets:
+    #   web_logs: {path: /var/log/nginx, kind: directory}
+    #   web_access: {path: /var/log/nginx/access.log, kind: file}
+    #   web_mount: {path: /var/log, kind: mount}
   example-app-01:
     address: 192.0.2.11
     port: 22

@@ -15,6 +15,7 @@ from .errors import ApprovalError, ConfigurationError, ExecutionUnknown, PolicyD
 from .models import Assertion, PlanAction, PlanDocument, RemediationOutcome, Runbook
 from .remote import REMOTE_SOURCE
 from .ssh import SSHAdapter, SSHResult
+from .storage_correlation import correlate_storage
 from .store import SQLiteStore, canonical_json, plan_document_hash
 
 _RANK = {"low": 0, "medium": 1, "high": 2}
@@ -313,6 +314,24 @@ class RunbookEngine:
                         and host_policy is not None
                         and probe_id in host_policy.allowed_probe_targets
                     )
+                    storage_id = arguments.get("storage_id")
+                    storage_configured = storage_id is None or (
+                        storage_id in host.storage_targets
+                        and host_policy is not None
+                        and storage_id in host_policy.allowed_storage_targets
+                        and (
+                            step.action not in {"filesystem.usage_summary", "filesystem.pressure"}
+                            or host.storage_targets[storage_id].kind == "directory"
+                        )
+                        and (
+                            step.action != "filesystem.log_growth"
+                            or host.storage_targets[storage_id].kind == "file"
+                        )
+                        and (
+                            step.action != "filesystem.mount_status"
+                            or host.storage_targets[storage_id].kind == "mount"
+                        )
+                    )
                     allowed = False
                     approval_required = False
                     reason = "host has no explicit policy; default deny"
@@ -324,6 +343,7 @@ class RunbookEngine:
                             and step.action in host_policy.diagnostic_actions
                             and unit_ok
                             and probe_configured
+                            and storage_configured
                         ):
                             allowed, reason = True, "explicit diagnostic action allow"
                         elif (
@@ -338,6 +358,10 @@ class RunbookEngine:
                         elif not probe_configured:
                             reason = (
                                 "probe endpoint is not configured and explicitly policy-allowed"
+                            )
+                        elif not storage_configured:
+                            reason = (
+                                "storage target is not configured and explicitly policy-allowed"
                             )
                         else:
                             reason = "action is not explicitly allowed by host policy"
@@ -511,6 +535,7 @@ class RunbookEngine:
         if plan.status == "approval_required":
             approval_id = self.store.consume_approval(plan.plan_id, plan.plan_hash)
         inventory, _ = load_inventory(self.paths.inventory)
+        policy, _ = load_policy(self.paths.policy)
         if self._executor is None:
             profiles, _ = load_ssh_profiles(self.paths.ssh_profiles, resolve_paths=True)
             adapter: ActionExecutor = SSHAdapter(profiles)
@@ -556,6 +581,20 @@ class RunbookEngine:
                     if endpoint is None:
                         raise PolicyDenied("probe endpoint disappeared after planning")
                     arguments["_endpoint"] = endpoint.model_dump()
+                storage_id = arguments.get("storage_id")
+                if storage_id is not None:
+                    host = inventory.hosts[item.target]
+                    storage = host.storage_targets.get(storage_id)
+                    host_policy = policy.hosts.get(item.target)
+                    if (
+                        storage is None
+                        or host_policy is None
+                        or storage_id not in host_policy.allowed_storage_targets
+                    ):
+                        raise PolicyDenied(
+                            "storage target disappeared or is no longer policy-allowed"
+                        )
+                    arguments["_storage"] = storage.model_dump()
                 if is_mutation:
                     mutation_attempted = True
                     if approval_id is None:
@@ -650,5 +689,12 @@ class RunbookEngine:
                 remediation_outcome = RemediationOutcome.UNKNOWN
             summary["remediation_outcome"] = remediation_outcome.value
         summary["step_statuses"] = statuses
+        if any(
+            item.action.startswith("filesystem.") or item.action == "os.disk"
+            for item in plan.actions
+        ):
+            summary["storage_correlation"] = correlate_storage(
+                self.store.execution(execution_id)["steps"]
+            )
         self.store.finish_execution(execution_id, final_status, now(), summary)
         return execution_id, final_status

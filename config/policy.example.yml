@@ -24,6 +24,11 @@ hosts:
       - process.tree
       - filesystem.mounts
       - filesystem.inodes
+      - filesystem.pressure
+      - filesystem.mount_status
+      - filesystem.path_metadata
+      - filesystem.usage_summary
+      - filesystem.log_growth
       - network.interfaces
       - network.routes
       - network.dns_resolve
@@ -33,6 +38,8 @@ hosts:
     remediation_actions: []
     # The matching probe_targets entry must be added to private inventory first.
     allowed_probe_targets: [service_health]
+    # Add reviewed aliases only after adding matching storage_targets in private inventory.
+    allowed_storage_targets: []
     allowed_units:
       - nginx.service
   example-app-01:

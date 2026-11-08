@@ -307,7 +307,8 @@ def mount_records(limit=128):
         left,separator,right=line.partition(" - ")
         before=left.split()
         after=right.split()
-        if not separator or len(before)<6 or len(after)<3: continue
+        if not separator or len(before)<6 or len(after)<3:
+            truncated=True; continue
         def unescape(value):
             return re.sub(r"\\([0-7]{3})",lambda match:chr(int(match.group(1),8)),value)
         mountpoint=unescape(before[4])
@@ -315,6 +316,153 @@ def mount_records(limit=128):
         records.append({"mountpoint":mountpoint[:512],"filesystem_type":after[0][:64],"read_only":"ro" in options})
         if len(records)>=limit: truncated=True; break
     return records,truncated
+def storage_target(args, action):
+    target=args.get("_storage")
+    target_id=args.get("storage_id")
+    allowed={"storage_id","_storage"}
+    if action=="filesystem.usage_summary": allowed.add("max_entries")
+    if action=="filesystem.log_growth": allowed.add("interval_seconds")
+    if set(args)-allowed: raise ValueError("storage arguments denied")
+    if not isinstance(target_id,str) or not re.fullmatch(r"[a-z][a-z0-9_-]{1,62}",target_id): raise ValueError("storage alias denied")
+    if not isinstance(target,dict) or set(target)!={"path","kind"}: raise ValueError("storage target denied")
+    path=target["path"]; kind=target["kind"]
+    if not isinstance(path,str) or len(path)>256 or not path.startswith("/") or path.startswith("//") or (path!="/" and path.endswith("/")) or any(part in ("",".","..") for part in path.split("/")[1:]) or any(char in path for char in "\x00\n\r"): raise ValueError("storage path denied")
+    if kind not in ("file","directory","mount"): raise ValueError("storage kind denied")
+    if action in ("filesystem.usage_summary","filesystem.pressure") and kind!="directory": raise ValueError("storage directory required")
+    if action=="filesystem.log_growth" and kind!="file": raise ValueError("storage file required")
+    if action=="filesystem.mount_status" and kind!="mount": raise ValueError("storage mount required")
+    return target_id,path,kind
+def value_has_unsafe_parts(path):
+    return path.endswith("/") or any(part in ("",".","..") for part in path.split("/")[1:])
+def storage_fd(path, directory=False):
+    flags=os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC
+    fd=os.open("/",flags)
+    try:
+        parts=path.split("/")[1:] if path!="/" else []
+        for index,part in enumerate(parts):
+            final=index==len(parts)-1
+            mode=(os.O_RDONLY|os.O_DIRECTORY if directory or not final else os.O_PATH)|os.O_NOFOLLOW|os.O_CLOEXEC
+            child=os.open(part,mode,dir_fd=fd)
+            os.close(fd); fd=child
+        return fd
+    except BaseException:
+        os.close(fd); raise
+def storage_mount_id(fd):
+    try:
+        with open("/proc/self/fdinfo/"+str(fd),encoding="ascii") as stream: raw=stream.read(4097)
+        if len(raw)>4096: return None
+        match=re.search(r"(?m)^mnt_id:\s*(\d+)$",raw)
+        return int(match.group(1)) if match else None
+    except (OSError,ValueError): return None
+def storage_metadata(target_id,path):
+    data={"storage_id":target_id,"status":"unknown","type":None,"size_bytes":None,"permissions":None,"modified_at_ns":None,"symlink":False,"contents_included":False}
+    try:
+        fd=storage_fd(path)
+        try: info=os.fstat(fd)
+        finally: os.close(fd)
+    except PermissionError: return data,"permission_denied"
+    except (OSError,ValueError): return data,"path_unavailable"
+    kind="file" if stat.S_ISREG(info.st_mode) else "directory" if stat.S_ISDIR(info.st_mode) else "symlink" if stat.S_ISLNK(info.st_mode) else "special"
+    data.update({"status":"available","type":kind,"size_bytes":info.st_size if kind=="file" else None,"permissions":format(stat.S_IMODE(info.st_mode),"04o"),"modified_at_ns":info.st_mtime_ns,"symlink":kind=="symlink"})
+    return data,None
+def storage_mount_status(target_id,path):
+    mounts,incomplete=mount_records(256)
+    data={"storage_id":target_id,"status":"unknown","present":None,"filesystem_type":None,"read_only":None,"inventory_complete":False}
+    if mounts is None: return data,"mount_inventory_unavailable"
+    found=next((item for item in mounts if item["mountpoint"]==path),None)
+    data.update({"status":"present" if found else "unknown" if incomplete else "missing","present":True if found else None if incomplete else False,"filesystem_type":found["filesystem_type"] if found else None,"read_only":found["read_only"] if found else None,"inventory_complete":not incomplete})
+    return data,None
+def storage_pressure(target_id,path):
+    data={"storage_id":target_id,"status":"unknown","total_bytes":None,"used_bytes":None,"available_bytes":None,"used_percent":None,"total_inodes":None,"free_inodes":None,"inode_used_percent":None,"read_only":None,"byte_capacity_known":False,"inode_capacity_known":False}
+    try:
+        fd=storage_fd(path,True)
+        try: info=os.fstatvfs(fd)
+        finally: os.close(fd)
+    except PermissionError: return data,"permission_denied"
+    except OSError: return data,"filesystem_unavailable"
+    total=info.f_blocks*info.f_frsize
+    free=info.f_bfree*info.f_frsize
+    available=info.f_bavail*info.f_frsize
+    inodes=info.f_files
+    inode_free=info.f_ffree
+    data.update({"total_bytes":total,"used_bytes":total-free,"available_bytes":available,"used_percent":round((total-free)*100/total,2) if total>0 else None,"total_inodes":inodes,"free_inodes":inode_free,"inode_used_percent":round((inodes-inode_free)*100/inodes,2) if inodes>0 else None,"read_only":bool(info.f_flag & os.ST_RDONLY),"byte_capacity_known":total>0,"inode_capacity_known":inodes>0})
+    if total>0 and inodes>0:
+        data["status"]="both_full" if available==0 and inode_free==0 else "byte_full" if available==0 else "inode_full" if inode_free==0 else "available"
+    return data,None
+def storage_usage(target_id,path,max_entries,timeout):
+    data={"storage_id":target_id,"status":"unknown","total_bytes":0,"regular_files":0,"directories":0,"hardlinks_deduplicated":0,"symlinks_skipped":0,"special_files_skipped":0,"mounts_skipped":0,"entries_scanned":0,"truncated":False,"inventory_complete":False,"contents_included":False}
+    deadline=time.monotonic()+timeout
+    mounts,incomplete=mount_records(256)
+    if mounts is None or incomplete: return data,"mount_inventory_unavailable"
+    mountpoints={record["mountpoint"] for record in mounts if record["mountpoint"]!=path}
+    try:
+        root=storage_fd(path,True); root_dev=os.fstat(root).st_dev
+    except PermissionError: return data,"permission_denied"
+    except OSError: return data,"path_unavailable"
+    root_mount=storage_mount_id(root)
+    if root_mount is None:
+        os.close(root)
+        return data,"mount_identity_unavailable"
+    stack=[(root,path)]; seen=set(); error=None
+    try:
+        while stack:
+            parent,current=stack.pop()
+            try:
+                data["directories"]+=1
+                with os.scandir(parent) as stream:
+                    for entry in stream:
+                        if time.monotonic()>=deadline or data["entries_scanned"]>=max_entries:
+                            data["truncated"]=True; break
+                        data["entries_scanned"]+=1
+                        try:
+                            item_fd=os.open(entry.name,os.O_PATH|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=parent)
+                            try: info=os.fstat(item_fd); item_mount=storage_mount_id(item_fd)
+                            finally: os.close(item_fd)
+                        except OSError as exc: error="permission_denied" if isinstance(exc,PermissionError) else "entry_unavailable"; break
+                        if item_mount is None: error="mount_identity_unavailable"; break
+                        child_path=current.rstrip("/")+"/"+entry.name
+                        if child_path in mountpoints or info.st_dev!=root_dev or item_mount!=root_mount:
+                            data["mounts_skipped"]+=1; continue
+                        if stat.S_ISLNK(info.st_mode): data["symlinks_skipped"]+=1; continue
+                        if stat.S_ISDIR(info.st_mode):
+                            try: child=os.open(entry.name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=parent)
+                            except OSError as exc: error="permission_denied" if isinstance(exc,PermissionError) else "entry_unavailable"; break
+                            child_info=os.fstat(child)
+                            if (child_info.st_dev,child_info.st_ino)!=(info.st_dev,info.st_ino) or storage_mount_id(child)!=root_mount:
+                                os.close(child); error="entry_changed"; break
+                            if child_info.st_dev!=root_dev: os.close(child); data["mounts_skipped"]+=1
+                            else: stack.append((child,child_path))
+                        elif stat.S_ISREG(info.st_mode):
+                            identity=(info.st_dev,info.st_ino)
+                            if identity in seen: data["hardlinks_deduplicated"]+=1
+                            else: seen.add(identity); data["regular_files"]+=1; data["total_bytes"]+=info.st_size
+                        else: data["special_files_skipped"]+=1
+                    if data["truncated"] or error: break
+            except OSError as exc: error="permission_denied" if isinstance(exc,PermissionError) else "entry_unavailable"; break
+            finally: os.close(parent)
+        data["inventory_complete"]=not data["truncated"] and error is None
+        data["status"]="complete" if data["inventory_complete"] else "unknown"
+        return data,error
+    finally:
+        for fd,_ in stack: os.close(fd)
+def storage_growth(target_id,path,interval):
+    data={"storage_id":target_id,"status":"unknown","snapshots":[],"interval_seconds":None,"growth_bytes":None,"contents_included":False}
+    for index in range(2):
+        try:
+            fd=storage_fd(path)
+            try: info=os.fstat(fd)
+            finally: os.close(fd)
+        except PermissionError: return data,"permission_denied"
+        except OSError: return data,"path_unavailable"
+        if not stat.S_ISREG(info.st_mode): return data,"regular_file_required"
+        data["snapshots"].append({"observed_at":time.time(),"size_bytes":info.st_size,"device":info.st_dev,"inode":info.st_ino})
+        if index==0: time.sleep(interval)
+    first,second=data["snapshots"]
+    data["interval_seconds"]=round(second["observed_at"]-first["observed_at"],3)
+    if (first["device"],first["inode"])!=(second["device"],second["inode"]): return data,"file_replaced"
+    data["growth_bytes"]=second["size_bytes"]-first["size_bytes"]
+    data["status"]="growing" if data["growth_bytes"]>0 else "shrinking" if data["growth_bytes"]<0 else "stable"
+    return data,None
 def read_bounded_regular(path,limit):
     fd=None
     try:
@@ -665,17 +813,21 @@ try:
                 emit(True,{"root_pid":pid,"processes":tree,"node_count":len(tree),"truncated":truncated,"scan_truncated":scan_truncated,"inventory_complete":not truncated,"scanned_processes":scanned,"unavailable_processes":unavailable,"command_lines_included":False})
     elif action == "os.disk":
         path=args.get("path","/")
-        if not isinstance(path,str) or not path.startswith("/") or "\x00" in path: raise ValueError("invalid path")
-        d=shutil.disk_usage(path)
-        emit(True,{"path":path,"total_bytes":d.total,"used_bytes":d.used,"free_bytes":d.free,"percent":int(d.used*100/d.total) if d.total else 0})
+        if not isinstance(path,str) or len(path)>256 or not path.startswith("/") or path.startswith("//") or (path!="/" and path.endswith("/")) or (path!="/" and any(part in ("",".","..") for part in path.split("/")[1:])) or any(char in path for char in "\x00\n\r"): raise ValueError("invalid path")
+        if not isinstance(timeout,int) or isinstance(timeout,bool) or not 1<=timeout<=15: raise ValueError("disk diagnostic timeout denied")
+        try:
+            d=shutil.disk_usage(path)
+            percent=int(d.used*100/d.total) if d.total else 0
+            emit(True,{"path":path,"total_bytes":d.total,"used_bytes":d.used,"free_bytes":d.free,"percent":percent,"capacity_known":d.total>0,"status":"full" if d.total>0 and d.free==0 else "available" if d.total>0 else "unknown"},uncertain=d.total==0)
+        except OSError: emit(False,{"path":path,"status":"unknown","capacity_known":False},"disk_unavailable",True)
     elif action == "filesystem.mounts":
         if not isinstance(timeout,int) or isinstance(timeout,bool) or not 1<=timeout<=5: raise ValueError("mount diagnostic timeout denied")
         mounts,truncated=mount_records(128)
         if mounts is None: emit(False,{"mounts":[]},"mount_inventory_unavailable")
-        else: emit(True,{"mounts":mounts,"mount_count":len(mounts),"possibly_truncated":truncated,"device_sources_included":False})
+        else: emit(True,{"mounts":mounts,"mount_count":len(mounts),"possibly_truncated":truncated,"inventory_complete":not truncated,"device_sources_included":False},uncertain=truncated)
     elif action == "filesystem.inodes":
         path=args.get("path")
-        if not isinstance(path,str) or len(path)>256 or not path.startswith("/") or any(char in path for char in "\x00\n\r") or ".." in path.split("/"): raise ValueError("filesystem path denied")
+        if not isinstance(path,str) or len(path)>256 or not path.startswith("/") or path.startswith("//") or (path!="/" and value_has_unsafe_parts(path)) or any(char in path for char in "\x00\n\r"): raise ValueError("filesystem path denied")
         if not isinstance(timeout,int) or isinstance(timeout,bool) or not 1<=timeout<=3: raise ValueError("inode diagnostic timeout denied")
         raw,error=bounded_stdout(["/usr/bin/stat","--file-system","--format=%T|%c|%d","--",path],timeout,4096)
         if error: emit(False,{"path":path},error)
@@ -685,7 +837,23 @@ try:
             else:
                 fs_type,total_inodes,free_inodes=fields
                 total=int(total_inodes); free=int(free_inodes)
-                emit(True,{"path":path,"filesystem_type":fs_type[:64],"total_inodes":total,"free_inodes":free,"used_percent":round((total-free)*100/total,2) if total else None,"inode_capacity_known":total>0})
+                emit(True,{"path":path,"filesystem_type":fs_type[:64],"total_inodes":total,"free_inodes":free,"used_percent":round((total-free)*100/total,2) if total else None,"inode_capacity_known":total>0,"status":"full" if total>0 and free==0 else "available" if total>0 else "unknown"},uncertain=total==0)
+    elif action in ("filesystem.mount_status","filesystem.pressure","filesystem.path_metadata","filesystem.usage_summary","filesystem.log_growth"):
+        target_id,path,kind=storage_target(args,action)
+        if not isinstance(timeout,int) or isinstance(timeout,bool) or not 1<=timeout<=5: raise ValueError("storage diagnostic timeout denied")
+        if action=="filesystem.mount_status":
+            data,error=storage_mount_status(target_id,path)
+        elif action=="filesystem.pressure": data,error=storage_pressure(target_id,path)
+        elif action=="filesystem.path_metadata": data,error=storage_metadata(target_id,path)
+        elif action=="filesystem.usage_summary":
+            limit=args.get("max_entries",256)
+            if type(limit) is not int or not 1<=limit<=1024: raise ValueError("storage scan limit denied")
+            data,error=storage_usage(target_id,path,limit,timeout)
+        else:
+            interval=args.get("interval_seconds",1)
+            if type(interval) is not int or not 1<=interval<=3 or interval>=timeout: raise ValueError("growth interval denied")
+            data,error=storage_growth(target_id,path,interval)
+        emit(error is None,data,error,error is not None or data.get("status")=="unknown")
     elif action == "os.packages":
         limit=args.get("limit",50)
         if type(limit) is not int or not 1<=limit<=100: raise ValueError("package inventory limit denied")
