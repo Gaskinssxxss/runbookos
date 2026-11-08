@@ -291,10 +291,25 @@ class RunbookEngine:
                         "network.reachability": {"tcp", "http", "https", "postgresql"},
                         "http.readiness": {"http", "https"},
                         "postgresql.protocol_available": {"postgresql"},
+                        "network.dns_resolve": {"tcp", "http", "https", "postgresql"},
+                        "network.listener": {"tcp", "http", "https", "postgresql"},
+                        "network.tls_certificate": {"https"},
                     }
                     probe_configured = probe_id is None or (
                         target_probe is not None
                         and target_probe.protocol in probe_protocols.get(step.action, set())
+                        and (step.action != "network.listener" or target_probe.local_listener)
+                        and (
+                            step.action != "network.dns_resolve"
+                            or (
+                                target_probe.dns_name is not None
+                                and target_probe.resolver_address is not None
+                            )
+                        )
+                        and (
+                            step.action != "network.tls_certificate"
+                            or target_probe.dns_name is not None
+                        )
                         and host_policy is not None
                         and probe_id in host_policy.allowed_probe_targets
                     )

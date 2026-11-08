@@ -104,6 +104,9 @@ class ProbeTarget(StrictModel):
     address: str = Field(min_length=7, max_length=15)
     port: int = Field(ge=1, le=65535)
     path: str | None = Field(default=None, max_length=128)
+    dns_name: str | None = Field(default=None, max_length=253)
+    resolver_address: str | None = Field(default=None, max_length=15)
+    local_listener: bool = Field(default=False, strict=True)
 
     @field_validator("address")
     @classmethod
@@ -139,12 +142,32 @@ class ProbeTarget(StrictModel):
             raise ValueError("probe HTTP path must be a fixed safe absolute path")
         return value
 
+    @field_validator("dns_name")
+    @classmethod
+    def safe_dns_name(cls, value: str | None) -> str | None:
+        if value is not None and (
+            len(value) > 253
+            or not re.fullmatch(
+                r"(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+",
+                value,
+            )
+        ):
+            raise ValueError("DNS name must be a fixed fully qualified name")
+        return value.lower() if value is not None else None
+
+    @field_validator("resolver_address")
+    @classmethod
+    def safe_resolver_address(cls, value: str | None) -> str | None:
+        return cls.private_ipv4_only(value) if value is not None else None
+
     @model_validator(mode="after")
     def protocol_fields(self) -> ProbeTarget:
         if self.protocol in {"http", "https"} and self.path is None:
             raise ValueError("HTTP probe targets require a fixed path")
         if self.protocol not in {"http", "https"} and self.path is not None:
             raise ValueError("only HTTP probe targets accept a path")
+        if self.resolver_address is not None and self.dns_name is None:
+            raise ValueError("resolver address requires an explicit DNS name")
         return self
 
 
