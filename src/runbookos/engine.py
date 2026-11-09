@@ -332,6 +332,14 @@ class RunbookEngine:
                             or host.storage_targets[storage_id].kind == "mount"
                         )
                     )
+                    legacy_storage_path_allowed = (
+                        step.action not in {"os.disk", "filesystem.inodes"}
+                        or (step.action == "os.disk" and "path" not in arguments)
+                        or (
+                            host_policy is not None
+                            and arguments.get("path") in host_policy.allowed_storage_paths
+                        )
+                    )
                     allowed = False
                     approval_required = False
                     reason = "host has no explicit policy; default deny"
@@ -344,6 +352,7 @@ class RunbookEngine:
                             and unit_ok
                             and probe_configured
                             and storage_configured
+                            and legacy_storage_path_allowed
                         ):
                             allowed, reason = True, "explicit diagnostic action allow"
                         elif (
@@ -363,6 +372,8 @@ class RunbookEngine:
                             reason = (
                                 "storage target is not configured and explicitly policy-allowed"
                             )
+                        elif not legacy_storage_path_allowed:
+                            reason = "storage path is outside the host policy allowlist"
                         else:
                             reason = "action is not explicitly allowed by host policy"
                     actions.append(
@@ -582,6 +593,15 @@ class RunbookEngine:
                         raise PolicyDenied("probe endpoint disappeared after planning")
                     arguments["_endpoint"] = endpoint.model_dump()
                 storage_id = arguments.get("storage_id")
+                if item.action in {"os.disk", "filesystem.inodes"} and not (
+                    item.action == "os.disk" and "path" not in arguments
+                ):
+                    host_policy = policy.hosts.get(item.target)
+                    if (
+                        host_policy is None
+                        or arguments.get("path") not in host_policy.allowed_storage_paths
+                    ):
+                        raise PolicyDenied("storage path is no longer policy-allowed")
                 if storage_id is not None:
                     host = inventory.hosts[item.target]
                     storage = host.storage_targets.get(storage_id)

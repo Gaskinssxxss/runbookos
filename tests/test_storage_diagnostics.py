@@ -16,8 +16,8 @@ from pydantic import ValidationError
 
 from runbookos.actions import validate_action
 from runbookos.engine import RunbookEngine
-from runbookos.errors import ConfigurationError
-from runbookos.models import StorageTarget
+from runbookos.errors import ConfigurationError, PolicyDenied
+from runbookos.models import HostPolicy, StorageTarget
 from runbookos.remote import REMOTE_SOURCE
 from runbookos.ssh import SSHResult
 from runbookos.storage_correlation import correlate_storage
@@ -90,12 +90,100 @@ def test_legacy_disk_and_inode_evidence_keeps_old_fields_and_marks_capacity(tmp_
     assert inode["data"]["status"] in {"available", "full", "unknown"}
 
 
+@pytest.mark.parametrize("action", ["os.disk", "filesystem.inodes"])
+def test_legacy_storage_diagnostics_reject_symlink_even_if_explicitly_selected(
+    tmp_path, monkeypatch, action
+):
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    result = dispatch_raw(monkeypatch, action, {"path": str(link)}, timeout=3)
+    assert result["ok"] is False
+    assert result["data"]["status"] == "unknown"
+
+
 @pytest.mark.parametrize(
     "path", ["/tmp/../etc", "//tmp/x", "/tmp//x", "/tmp/./x", "/tmp/x/", "/tmp/evil\n"]
 )
 def test_storage_inventory_rejects_unsafe_paths(path):
     with pytest.raises(ValidationError):
         StorageTarget(path=path, kind="directory")
+
+
+@pytest.mark.parametrize(
+    "path", ["/var/../etc", "//var", "/var//log", "/var/./log", "/var/log/", "relative"]
+)
+def test_legacy_storage_policy_rejects_noncanonical_paths(path):
+    with pytest.raises(ValidationError):
+        HostPolicy(allowed_storage_paths=[path])
+
+
+def test_legacy_storage_paths_require_exact_host_allowlist_at_plan_and_execution(tmp_path):
+    paths = write_config_tree(tmp_path)
+    policy = yaml.safe_load(paths.policy.read_text())
+    policy["hosts"]["test-web"]["diagnostic_actions"] = ["os.disk", "filesystem.inodes"]
+    paths.policy.write_text(yaml.safe_dump(policy))
+    runbook = tmp_path / "legacy-storage.yml"
+
+    def plan_for(action, arguments):
+        runbook.write_text(
+            yaml.safe_dump(
+                {
+                    "api_version": "runbookos/v1",
+                    "kind": "Runbook",
+                    "metadata": {
+                        "id": "legacy-storage",
+                        "name": "Legacy storage",
+                        "description": "Offline check",
+                        "risk": "low",
+                    },
+                    "targets": ["test-web"],
+                    "steps": [
+                        {"id": "check", "action": action, "with": arguments, "timeout_seconds": 3}
+                    ],
+                }
+            )
+        )
+        return RunbookEngine(paths).plan(runbook)
+
+    for action in ("os.disk", "filesystem.inodes"):
+        assert plan_for(action, {"path": "/var"}).status == "denied"
+        with pytest.raises(ConfigurationError):
+            plan_for(action, {"path": "/var/../etc"})
+    # The historical pathless disk check remains a root-only default.
+    assert plan_for("os.disk", {}).status == "ready"
+    policy["hosts"]["test-web"]["allowed_storage_paths"] = ["/"]
+    paths.policy.write_text(yaml.safe_dump(policy))
+    assert plan_for("os.disk", {"path": "/"}).status == "ready"
+    assert plan_for("filesystem.inodes", {"path": "/"}).status == "ready"
+    assert plan_for("os.disk", {"path": "/var"}).status == "denied"
+
+    # A symlink spelling cannot borrow the allowlist entry of its target.
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    policy["hosts"]["test-web"]["allowed_storage_paths"] = [str(real)]
+    paths.policy.write_text(yaml.safe_dump(policy))
+    assert plan_for("os.disk", {"path": str(link)}).status == "denied"
+    assert plan_for("filesystem.inodes", {"path": str(link)}).status == "denied"
+
+    plan = plan_for("os.disk", {"path": str(real)})
+    assert plan.status == "ready"
+    policy["hosts"]["test-web"]["allowed_storage_paths"] = []
+    paths.policy.write_text(yaml.safe_dump(policy))
+    with pytest.raises(PolicyDenied, match="configuration changed"):
+        RunbookEngine(paths).execute(plan.plan_id, diagnostic_only=True)
+
+    policy["hosts"]["test-web"]["allowed_storage_paths"] = [str(real)]
+    paths.policy.write_text(yaml.safe_dump(policy))
+    plan = plan_for("os.disk", {"path": str(real)})
+    inventory = yaml.safe_load(paths.inventory.read_text())
+    inventory["hosts"]["test-web"]["role"] = "app-server"
+    paths.inventory.write_text(yaml.safe_dump(inventory))
+    with pytest.raises(PolicyDenied, match="configuration changed"):
+        RunbookEngine(paths).execute(plan.plan_id, diagnostic_only=True)
 
 
 def test_metadata_never_reads_contents_or_follows_symlinks(tmp_path):
@@ -171,7 +259,7 @@ def test_usage_timeout_and_directory_replacement_fail_closed(tmp_path):
     root.mkdir()
     (root / "child").mkdir()
     namespace = helpers()
-    ticks = iter([0, 4])
+    ticks = iter([0, 0, 4])
     namespace["time"] = SimpleNamespace(monotonic=lambda: next(ticks))
     timed_out, error = namespace["storage_usage"]("sample", str(root), 16, 3)
     assert error is None
@@ -194,6 +282,38 @@ def test_usage_timeout_and_directory_replacement_fail_closed(tmp_path):
     changed, error = namespace["storage_usage"]("sample", str(root), 16, 3)
     assert error == "entry_changed"
     assert changed["status"] == "unknown"
+
+
+def test_usage_entry_budget_stops_before_queued_directories(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    for name in ("first", "second"):
+        child = root / name
+        child.mkdir()
+        (child / "payload").write_text("unvisited")
+    result, error = helpers()["storage_usage"]("sample", str(root), 2, 3)
+    assert error is None
+    assert result["entries_scanned"] == 2
+    assert result["directories"] == 1
+    assert result["regular_files"] == 0
+    assert result["truncated"] is True
+    assert result["status"] == "unknown"
+
+
+def test_usage_timeout_stops_before_queued_directories(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    for name in ("first", "second"):
+        (root / name).mkdir()
+    namespace = helpers()
+    ticks = iter([0, 0, 0, 0, 4])
+    namespace["time"] = SimpleNamespace(monotonic=lambda: next(ticks))
+    result, error = namespace["storage_usage"]("sample", str(root), 16, 3)
+    assert error is None
+    assert result["entries_scanned"] == 2
+    assert result["directories"] == 1
+    assert result["truncated"] is True
+    assert result["status"] == "unknown"
 
 
 def test_usage_missing_mount_identity_and_permission_denial_are_unknown(tmp_path):

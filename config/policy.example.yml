@@ -40,17 +40,21 @@ hosts:
     allowed_probe_targets: [service_health]
     # Add reviewed aliases only after adding matching storage_targets in private inventory.
     allowed_storage_targets: []
+    allowed_storage_paths: ["/"] # Explicitly permits legacy os.disk/filesystem.inodes root checks only.
     allowed_units:
       - nginx.service
   example-app-01:
     diagnostic_actions: [systemd.is_active, systemd.service_status, systemd.failed_units, systemd.journal_summary, systemd.timers, os.uptime, os.cpu, os.release, os.memory, os.disk, os.packages, os.cron, process.list, process.inspect, process.tree, filesystem.mounts, filesystem.inodes]
     remediation_actions: []
+    allowed_storage_paths: ["/"]
     allowed_units: [runbookos-sample.service]
   example-db-01:
     diagnostic_actions: [systemd.is_active, systemd.service_status, systemd.failed_units, systemd.journal_summary, systemd.timers, os.uptime, os.cpu, os.release, os.memory, os.disk, os.packages, os.cron, process.list, filesystem.mounts, filesystem.inodes]
     remediation_actions: []
+    allowed_storage_paths: ["/"]
     allowed_units: [postgresql.service]
   example-net-01:
     diagnostic_actions: [systemd.is_active, systemd.service_status, systemd.failed_units, systemd.journal_summary, systemd.timers, os.uptime, os.cpu, os.release, os.memory, os.disk, os.packages, os.cron, process.list, filesystem.mounts, filesystem.inodes, network.interfaces, network.routes]
     remediation_actions: []
+    allowed_storage_paths: ["/"]
     allowed_units: [nftables.service]

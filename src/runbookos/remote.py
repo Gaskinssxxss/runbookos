@@ -4,7 +4,7 @@ import base64
 import json
 import shlex
 
-REMOTE_SOURCE = r"""import base64, http.client, ipaddress, json, os, re, selectors, shutil, socket, ssl, stat, struct, subprocess, sys, time
+REMOTE_SOURCE = r"""import base64, http.client, ipaddress, json, os, re, selectors, socket, ssl, stat, struct, subprocess, sys, time
 def emit(ok, data=None, error=None, uncertain=False):
     print(json.dumps({"ok": ok, "data": data or {}, "error": error, "uncertain": uncertain}, separators=(",", ":")))
 def probe_endpoint(action, args, timeout):
@@ -81,9 +81,9 @@ def probe_endpoint(action, args, timeout):
         data.update({"protocol_available":available,"ssl_supported":code == "S","ssl_negotiation_response":code,"authentication_attempted":False,"database_readiness_verified":False,"duration_seconds":round(time.monotonic()-start,3)})
         return data,error
     raise ValueError("unsupported diagnostic action")
-def bounded_stdout(argv, timeout, byte_limit):
+def bounded_stdout(argv, timeout, byte_limit, pass_fds=()):
     try:
-        process=subprocess.Popen(argv,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,close_fds=True,start_new_session=True)
+        process=subprocess.Popen(argv,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,close_fds=True,start_new_session=True,pass_fds=pass_fds)
     except OSError as exc:
         return None,type(exc).__name__
     selector=selectors.DefaultSelector()
@@ -406,6 +406,8 @@ def storage_usage(target_id,path,max_entries,timeout):
     stack=[(root,path)]; seen=set(); error=None
     try:
         while stack:
+            if time.monotonic()>=deadline or data["entries_scanned"]>=max_entries:
+                data["truncated"]=True; break
             parent,current=stack.pop()
             try:
                 data["directories"]+=1
@@ -816,9 +818,14 @@ try:
         if not isinstance(path,str) or len(path)>256 or not path.startswith("/") or path.startswith("//") or (path!="/" and path.endswith("/")) or (path!="/" and any(part in ("",".","..") for part in path.split("/")[1:])) or any(char in path for char in "\x00\n\r"): raise ValueError("invalid path")
         if not isinstance(timeout,int) or isinstance(timeout,bool) or not 1<=timeout<=15: raise ValueError("disk diagnostic timeout denied")
         try:
-            d=shutil.disk_usage(path)
-            percent=int(d.used*100/d.total) if d.total else 0
-            emit(True,{"path":path,"total_bytes":d.total,"used_bytes":d.used,"free_bytes":d.free,"percent":percent,"capacity_known":d.total>0,"status":"full" if d.total>0 and d.free==0 else "available" if d.total>0 else "unknown"},uncertain=d.total==0)
+            fd=storage_fd(path)
+            try:
+                if stat.S_ISLNK(os.fstat(fd).st_mode): raise OSError("symlink denied")
+                info=os.fstatvfs(fd)
+            finally: os.close(fd)
+            total=info.f_blocks*info.f_frsize; used=(info.f_blocks-info.f_bfree)*info.f_frsize; free=info.f_bavail*info.f_frsize
+            percent=int(used*100/total) if total else 0
+            emit(True,{"path":path,"total_bytes":total,"used_bytes":used,"free_bytes":free,"percent":percent,"capacity_known":total>0,"status":"full" if total>0 and free==0 else "available" if total>0 else "unknown"},uncertain=total==0)
         except OSError: emit(False,{"path":path,"status":"unknown","capacity_known":False},"disk_unavailable",True)
     elif action == "filesystem.mounts":
         if not isinstance(timeout,int) or isinstance(timeout,bool) or not 1<=timeout<=5: raise ValueError("mount diagnostic timeout denied")
@@ -829,15 +836,22 @@ try:
         path=args.get("path")
         if not isinstance(path,str) or len(path)>256 or not path.startswith("/") or path.startswith("//") or (path!="/" and value_has_unsafe_parts(path)) or any(char in path for char in "\x00\n\r"): raise ValueError("filesystem path denied")
         if not isinstance(timeout,int) or isinstance(timeout,bool) or not 1<=timeout<=3: raise ValueError("inode diagnostic timeout denied")
-        raw,error=bounded_stdout(["/usr/bin/stat","--file-system","--format=%T|%c|%d","--",path],timeout,4096)
-        if error: emit(False,{"path":path},error)
+        try:
+            fd=storage_fd(path)
+            if stat.S_ISLNK(os.fstat(fd).st_mode): raise OSError("symlink denied")
+        except OSError:
+            emit(False,{"path":path,"status":"unknown"},"filesystem_unavailable",True)
         else:
-            fields=raw.decode("utf-8","replace").strip().split("|")
-            if len(fields)!=3 or not all(value.isdigit() for value in fields[1:]): emit(False,{"path":path},"invalid_filesystem_statistics")
+            try: raw,error=bounded_stdout(["/usr/bin/stat","--file-system","--format=%T|%c|%d","--","/proc/self/fd/"+str(fd)],timeout,4096,pass_fds=(fd,))
+            finally: os.close(fd)
+            if error: emit(False,{"path":path},error)
             else:
-                fs_type,total_inodes,free_inodes=fields
-                total=int(total_inodes); free=int(free_inodes)
-                emit(True,{"path":path,"filesystem_type":fs_type[:64],"total_inodes":total,"free_inodes":free,"used_percent":round((total-free)*100/total,2) if total else None,"inode_capacity_known":total>0,"status":"full" if total>0 and free==0 else "available" if total>0 else "unknown"},uncertain=total==0)
+                fields=raw.decode("utf-8","replace").strip().split("|")
+                if len(fields)!=3 or not all(value.isdigit() for value in fields[1:]): emit(False,{"path":path},"invalid_filesystem_statistics")
+                else:
+                    fs_type,total_inodes,free_inodes=fields
+                    total=int(total_inodes); free=int(free_inodes)
+                    emit(True,{"path":path,"filesystem_type":fs_type[:64],"total_inodes":total,"free_inodes":free,"used_percent":round((total-free)*100/total,2) if total else None,"inode_capacity_known":total>0,"status":"full" if total>0 and free==0 else "available" if total>0 else "unknown"},uncertain=total==0)
     elif action in ("filesystem.mount_status","filesystem.pressure","filesystem.path_metadata","filesystem.usage_summary","filesystem.log_growth"):
         target_id,path,kind=storage_target(args,action)
         if not isinstance(timeout,int) or isinstance(timeout,bool) or not 1<=timeout<=5: raise ValueError("storage diagnostic timeout denied")

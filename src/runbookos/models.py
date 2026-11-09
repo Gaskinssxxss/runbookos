@@ -241,6 +241,30 @@ class HostPolicy(StrictModel):
     allowed_units: list[str] = Field(default_factory=list)
     allowed_probe_targets: list[str] = Field(default_factory=list)
     allowed_storage_targets: list[str] = Field(default_factory=list)
+    allowed_storage_paths: list[str] = Field(default_factory=list, max_length=64)
+
+    @field_validator("allowed_storage_paths")
+    @classmethod
+    def safe_storage_paths(cls, value: list[str]) -> list[str]:
+        for path in value:
+            if (
+                not isinstance(path, str)
+                or len(path) > 256
+                or (
+                    path != "/"
+                    and (
+                        not path.startswith("/")
+                        or path.startswith("//")
+                        or path.endswith("/")
+                        or any(part in {"", ".", ".."} for part in path.split("/")[1:])
+                    )
+                )
+                or any(char in path for char in "\x00\n\r")
+            ):
+                raise ValueError("allowed storage paths must be normalized absolute paths")
+        if len(value) != len(set(value)):
+            raise ValueError("allowed storage paths must be unique")
+        return value
 
 
 class ApprovalPolicy(StrictModel):
