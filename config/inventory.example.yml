@@ -48,6 +48,13 @@ hosts:
     role: database-server
     ssh_profile: default
     host_key_alias: example-db-01
+    # Authenticated SQL checks require an exact private address and verified TLS name.
+    # The credential ID names a separate owner-only pgpass file on the target;
+    # never put a password in inventory or runbooks.
+    # probe_targets:
+    #   db_main: {protocol: postgresql, address: 10.1.2.5, port: 5432, dns_name: db.example.internal, database_name: diagnostics, database_user: runbook_diag, credential_id: db-main, pressure_storage_ids: [db_data]}
+    # storage_targets:
+    #   db_data: {path: /var/lib/postgresql/data, kind: directory}
   example-net-01:
     address: 192.0.2.13
     port: 22

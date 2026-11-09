@@ -57,6 +57,10 @@ hosts:
     remediation_actions: []
     allowed_storage_paths: ["/"]
     allowed_units: [postgresql.service]
+    # Explicitly allow each SQL check and exact database endpoint only after
+    # provisioning a read-only role and private pgpass on the database host.
+    # diagnostic_actions: [postgresql.protocol_available, postgresql.inspect]
+    # allowed_probe_targets: [db_main]
   example-net-01:
     diagnostic_actions: [systemd.is_active, systemd.service_status, systemd.failed_units, systemd.journal_summary, systemd.timers, os.uptime, os.cpu, os.release, os.memory, os.disk, os.packages, os.cron, process.list, filesystem.mounts, filesystem.inodes, network.interfaces, network.routes]
     remediation_actions: []

@@ -12,6 +12,7 @@ from . import __version__
 from .actions import REGISTRY, validate_argument_keys, validate_phase_action
 from .application_correlation import correlate_application
 from .config import file_digest, load_inventory, load_policy, load_runbook, load_ssh_profiles
+from .database_correlation import correlate_database
 from .errors import ApprovalError, ConfigurationError, ExecutionUnknown, PolicyDenied
 from .models import Assertion, PlanAction, PlanDocument, RemediationOutcome, Runbook
 from .remote import REMOTE_SOURCE
@@ -324,6 +325,7 @@ class RunbookEngine:
                         "network.reachability": {"tcp", "http", "https", "postgresql"},
                         "http.readiness": {"http", "https"},
                         "postgresql.protocol_available": {"postgresql"},
+                        "postgresql.inspect": {"postgresql"},
                         "network.dns_resolve": {"tcp", "http", "https", "postgresql"},
                         "network.listener": {"tcp", "http", "https", "postgresql"},
                         "network.tls_certificate": {"https"},
@@ -345,6 +347,18 @@ class RunbookEngine:
                         )
                         and host_policy is not None
                         and probe_id in host_policy.allowed_probe_targets
+                        and (
+                            step.action != "postgresql.inspect"
+                            or all(
+                                getattr(target_probe, field) is not None
+                                for field in (
+                                    "database_name",
+                                    "database_user",
+                                    "credential_id",
+                                    "dns_name",
+                                )
+                            )
+                        )
                     )
                     storage_id = arguments.get("storage_id")
                     storage_configured = storage_id is None or (
@@ -822,5 +836,37 @@ class RunbookEngine:
                 )
         if app_summaries:
             summary["application_correlation"] = app_summaries
+        database_summaries = []
+        for target in sorted({item.target for item in plan.actions}):
+            host = inventory.hosts[target]
+            host_policy = policy.hosts.get(target)
+            if host_policy is None:
+                continue
+            for endpoint_id, endpoint in host.probe_targets.items():
+                if (
+                    endpoint.protocol != "postgresql"
+                    or endpoint_id not in host_policy.allowed_probe_targets
+                ):
+                    continue
+                if not any(
+                    item.target == target
+                    and (
+                        item.arguments.get("endpoint_id") == endpoint_id
+                        or item.arguments.get("storage_id") in endpoint.pressure_storage_ids
+                    )
+                    for item in plan.actions
+                ):
+                    continue
+                database_summaries.append(
+                    correlate_database(
+                        self.store.execution(execution_id)["steps"],
+                        target,
+                        endpoint_id,
+                        frozenset(endpoint.pressure_storage_ids)
+                        & frozenset(host_policy.allowed_storage_targets),
+                    )
+                )
+        if database_summaries:
+            summary["database_correlation"] = database_summaries
         self.store.finish_execution(execution_id, final_status, now(), summary)
         return execution_id, final_status

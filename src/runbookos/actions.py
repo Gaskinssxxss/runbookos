@@ -14,6 +14,10 @@ class ProbeArguments(BaseModel):
     endpoint_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{1,62}$")
 
 
+class PostgreSQLInspectArguments(ProbeArguments):
+    check: Literal["readiness", "connections", "replication", "sessions"]
+
+
 class ApplicationArguments(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     application_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{1,62}$")
@@ -507,6 +511,13 @@ REGISTRY: dict[str, ActionDefinition] = {
         True,
         frozenset({"endpoint_id"}),
         arguments_model=ProbeArguments,
+        max_timeout_seconds=10,
+    ),
+    "postgresql.inspect": ActionDefinition(
+        "postgresql.inspect",
+        True,
+        frozenset({"endpoint_id", "check"}),
+        arguments_model=PostgreSQLInspectArguments,
         max_timeout_seconds=10,
     ),
     "dns.resolve_fixture": ActionDefinition(

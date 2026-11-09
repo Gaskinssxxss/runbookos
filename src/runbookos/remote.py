@@ -4,9 +4,98 @@ import base64
 import json
 import shlex
 
-REMOTE_SOURCE = r"""import base64, hashlib, http.client, ipaddress, json, os, re, selectors, socket, ssl, stat, struct, subprocess, sys, time
+REMOTE_SOURCE = r"""import base64, hashlib, http.client, ipaddress, json, math, os, pwd, re, selectors, socket, ssl, stat, struct, subprocess, sys, time
 def emit(ok, data=None, error=None, uncertain=False):
     print(json.dumps({"ok": ok, "data": data or {}, "error": error, "uncertain": uncertain}, separators=(",", ":")))
+PG_QUERIES={
+    "readiness": "SELECT json_build_object('query_succeeded',true,'in_recovery',pg_is_in_recovery())::text",
+    "connections": "SELECT json_build_object('stats_visible',pg_has_role(current_user,'pg_read_all_stats','MEMBER'),'active',count(*) FILTER (WHERE state='active'),'idle',count(*) FILTER (WHERE state='idle'),'total',count(*),'max_connections',current_setting('max_connections')::int,'superuser_reserved',current_setting('superuser_reserved_connections')::int)::text FROM pg_stat_activity",
+    "replication": "SELECT json_build_object('stats_visible',pg_has_role(current_user,'pg_read_all_stats','MEMBER'),'in_recovery',pg_is_in_recovery(),'sender_count',(SELECT count(*) FROM pg_stat_replication),'receiver_count',(SELECT count(*) FROM pg_stat_wal_receiver),'max_replay_lag_seconds',(SELECT max(extract(epoch from replay_lag)) FROM pg_stat_replication))::text",
+    "sessions": "SELECT json_build_object('stats_visible',pg_has_role(current_user,'pg_read_all_stats','MEMBER'),'active',count(*) FILTER (WHERE state='active'),'idle',count(*) FILTER (WHERE state='idle'),'long_transaction_count',count(*) FILTER (WHERE xact_start IS NOT NULL AND clock_timestamp()-xact_start > interval '5 minutes'),'waiting_count',count(*) FILTER (WHERE wait_event_type IS NOT NULL),'oldest_transaction_seconds',max(extract(epoch from clock_timestamp()-xact_start)))::text FROM pg_stat_activity",
+}
+def bounded_postgresql(argv,env,timeout):
+    try: process=subprocess.Popen(argv,env=env,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,close_fds=True,start_new_session=True)
+    except OSError: return None,b'',b'','psql_unavailable'
+    output={process.stdout:bytearray(),process.stderr:bytearray()}
+    limits={process.stdout:4096,process.stderr:256}
+    selector=selectors.DefaultSelector(); deadline=time.monotonic()+timeout
+    try:
+        for stream in output: selector.register(stream,selectors.EVENT_READ)
+        while selector.get_map():
+            remaining=deadline-time.monotonic()
+            if remaining<=0: return None,b'',b'','query_timeout'
+            events=selector.select(remaining)
+            if not events: return None,b'',b'','query_timeout'
+            for key,_ in events:
+                stream=key.fileobj
+                chunk=os.read(stream.fileno(),min(4096,limits[stream]-len(output[stream])+1))
+                if not chunk: selector.unregister(stream)
+                else:
+                    output[stream].extend(chunk)
+                    if len(output[stream])>limits[stream]: return None,b'',b'','output_limit_exceeded'
+        remaining=deadline-time.monotonic()
+        if remaining<=0: return None,b'',b'','query_timeout'
+        return process.wait(timeout=remaining),bytes(output[process.stdout]),bytes(output[process.stderr]),None
+    except (OSError,subprocess.TimeoutExpired): return None,b'',b'','query_timeout'
+    finally:
+        selector.close()
+        if process.poll() is None:
+            process.kill(); process.wait()
+        process.stdout.close(); process.stderr.close()
+def postgresql_inspect(args,timeout):
+    endpoint=args.get('_endpoint'); endpoint_id=args.get('endpoint_id'); check=args.get('check')
+    if not isinstance(endpoint,dict) or check not in PG_QUERIES or not isinstance(endpoint_id,str) or not re.fullmatch(r'[a-z][a-z0-9_-]{1,62}',endpoint_id): raise ValueError('PostgreSQL check denied')
+    address=endpoint.get('address'); name=endpoint.get('dns_name'); port=endpoint.get('port'); database=endpoint.get('database_name'); user=endpoint.get('database_user'); credential=endpoint.get('credential_id')
+    if endpoint.get('protocol')!='postgresql' or not valid_private_ipv4(address) or not valid_dns_name(name) or type(port) is not int or not 1<=port<=65535 or not isinstance(database,str) or not re.fullmatch(r'[a-zA-Z_][a-zA-Z0-9_]{0,62}',database) or not isinstance(user,str) or not re.fullmatch(r'[a-z_][a-z0-9_]{0,62}',user) or not isinstance(credential,str) or not re.fullmatch(r'[a-z][a-z0-9_-]{1,62}',credential) or type(timeout) is not int or not 1<=timeout<=10: raise ValueError('PostgreSQL source denied')
+    data={'endpoint_id':endpoint_id,'check':check,'status':'unknown','authentication_available':None,'query_succeeded':False,'sql_health_authorized':True,'tcp_reachable':None,'protocol_responsive':None}
+    home=pwd.getpwuid(os.getuid()).pw_dir; directory=os.path.join(home,'.config','runbookos','pgpass'); path=os.path.join(directory,credential)
+    try:
+        for parent in (os.path.join(home,'.config'),os.path.join(home,'.config','runbookos'),directory):
+            info=os.lstat(parent)
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid!=os.getuid() or info.st_mode & 0o077: raise OSError('credential directory denied')
+        info=os.lstat(path)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid() or info.st_mode & 0o077 or info.st_size>4096: raise OSError('credential file denied')
+    except OSError: return data,'credential_unavailable'
+    if not os.path.isfile('/usr/bin/psql'): return data,'psql_unavailable'
+    env={'PATH':'/usr/bin:/bin','HOME':home,'PGPASSFILE':path,'PGHOST':name,'PGHOSTADDR':address,'PGPORT':str(port),'PGDATABASE':database,'PGUSER':user,'PGSSLMODE':'verify-full','PGCONNECT_TIMEOUT':str(min(timeout,5)),'PGOPTIONS':'-c default_transaction_read_only=on -c statement_timeout=5000 -c lock_timeout=1000 -c search_path=pg_catalog'}
+    argv=['/usr/bin/psql','-X','-w','-q','-t','-A','-v','ON_ERROR_STOP=1','-v','VERBOSITY=sqlstate','-c',PG_QUERIES[check]]
+    started=time.monotonic()
+    returncode,stdout,stderr,command_error=bounded_postgresql(argv,env,timeout)
+    data['duration_seconds']=round(time.monotonic()-started,3)
+    if command_error: return data,command_error
+    if returncode!=0:
+        if b'28P01' in stderr or b'28000' in stderr: error='authentication_denied'
+        elif b'42501' in stderr: error='permission_denied'
+        else: error='query_unavailable'
+        return data,error
+    data['authentication_available']=True
+    try:
+        line=stdout.decode('utf-8').strip()
+        if '\n' in line: raise ValueError('multiple rows')
+        values=json.loads(line)
+        if not isinstance(values,dict): raise ValueError('invalid row')
+        fields={'readiness':{'query_succeeded','in_recovery'},'connections':{'stats_visible','active','idle','total','max_connections','superuser_reserved'},'replication':{'stats_visible','in_recovery','sender_count','receiver_count','max_replay_lag_seconds'},'sessions':{'stats_visible','active','idle','long_transaction_count','waiting_count','oldest_transaction_seconds'}}[check]
+        if set(values)!=fields or any(type(v) not in (int,float,bool,type(None)) for v in values.values()): raise ValueError('invalid fields')
+        if any(type(v) in (int,float) and (not math.isfinite(v) or v<0 or v>1000000000) for v in values.values()): raise ValueError('invalid value')
+        if check=='readiness' and (values['query_succeeded'] is not True or type(values['in_recovery']) is not bool): raise ValueError('invalid readiness')
+        if check!='readiness' and type(values['stats_visible']) is not bool: raise ValueError('invalid privilege status')
+        if check=='connections' and any(type(values[k]) is not int for k in ('active','idle','total','max_connections','superuser_reserved')): raise ValueError('invalid connection counts')
+        if check=='sessions' and (any(type(values[k]) is not int for k in ('active','idle','long_transaction_count','waiting_count')) or values['oldest_transaction_seconds'] is not None and type(values['oldest_transaction_seconds']) not in (int,float)): raise ValueError('invalid session counts')
+        if check=='replication' and (type(values['in_recovery']) is not bool or any(type(values[k]) is not int for k in ('sender_count','receiver_count')) or values['max_replay_lag_seconds'] is not None and type(values['max_replay_lag_seconds']) not in (int,float)): raise ValueError('invalid replication counts')
+    except (UnicodeError,ValueError): return data,'invalid_query_response'
+    data.update(values); data['query_succeeded']=True; data['status']='observed'
+    if check != 'readiness' and values['stats_visible'] is not True:
+        data['status']='unknown'; data['query_succeeded']=False
+        for field in fields-{'stats_visible'}: data.pop(field,None)
+        return data,'statistics_privilege_unavailable'
+    if check=='connections':
+        maximum=values['max_connections']; reserved=values['superuser_reserved']; total=values['total']
+        if not all(type(v) is int for v in (maximum,reserved,total,values['active'],values['idle'])) or maximum<=0 or reserved>=maximum: return data,'invalid_query_response'
+        data['utilization_percent']=round(total*100/maximum,2); data['possible_exhaustion']=total>=maximum-reserved
+    if check=='replication':
+        if type(values['in_recovery']) is not bool or type(values['sender_count']) is not int or type(values['receiver_count']) is not int: return data,'invalid_query_response'
+        data['role']='standby' if values['in_recovery'] else 'primary'; data['replication_evidence']='observed' if values['sender_count'] or values['receiver_count'] else 'missing'
+    return data,None
 def application_diagnostic(action,args,timeout):
     app_id=args.get("application_id"); app=args.get("_application")
     if not isinstance(app_id,str) or not re.fullmatch(r"[a-z][a-z0-9_-]{1,62}",app_id) or not isinstance(app,dict): raise ValueError("application identity denied")
@@ -84,7 +173,7 @@ def application_diagnostic(action,args,timeout):
     finally: data["duration_seconds"]=round(time.monotonic()-start,3)
 def probe_endpoint(action, args, timeout):
     endpoint=args.get("_endpoint")
-    if not isinstance(endpoint,dict) or set(endpoint) not in ({"protocol","address","port","path"},{"protocol","address","port","path","dns_name","resolver_address"},{"protocol","address","port","path","dns_name","resolver_address","local_listener"}): raise ValueError("invalid endpoint")
+    if not isinstance(endpoint,dict) or not {"protocol","address","port","path"}<=set(endpoint) or set(endpoint)-{"protocol","address","port","path","dns_name","resolver_address","local_listener","database_name","database_user","credential_id","pressure_storage_ids"}: raise ValueError("invalid endpoint")
     address=endpoint["address"]
     if not isinstance(address,str) or not re.fullmatch(r"[0-9]{1,3}(?:\.[0-9]{1,3}){3}",address): raise ValueError("endpoint address denied")
     ip=ipaddress.ip_address(address)
@@ -1005,6 +1094,9 @@ try:
     elif action in ("application.health","application.queue_health","application.config_fingerprint","application.deploy_version"):
         data,error=application_diagnostic(action,args,timeout)
         emit(error is None,data,error,error is not None or data.get("status")=="unknown")
+    elif action == "postgresql.inspect":
+        data,error=postgresql_inspect(args,timeout)
+        emit(error is None,data,error,error is not None)
     elif action in ("network.tcp_connect","network.reachability","http.readiness","postgresql.protocol_available","network.dns_resolve","network.listener","network.tls_certificate"):
         data,error=probe_endpoint(action,args,timeout)
         if action in ("network.tcp_connect","network.reachability","http.readiness","postgresql.protocol_available"): emit(True,data,error)
