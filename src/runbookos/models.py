@@ -190,6 +190,41 @@ class StorageTarget(StrictModel):
         return value
 
 
+class ApplicationProfile(StrictModel):
+    health_endpoint_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{1,62}$")
+    dependency_endpoint_ids: list[str] = Field(default_factory=list, max_length=8)
+    queue_endpoint_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]{1,62}$")
+    queue_max_depth: int | None = Field(default=None, ge=0, le=1000000)
+    queue_max_age_seconds: int | None = Field(default=None, ge=0, le=86400)
+    worker_unit: str | None = Field(
+        default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,127}\.service$"
+    )
+    config_storage_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]{1,62}$")
+    expected_config_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    version_storage_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]{1,62}$")
+    expected_version: str | None = Field(
+        default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$"
+    )
+
+    @model_validator(mode="after")
+    def valid_sources(self) -> ApplicationProfile:
+        if len(self.dependency_endpoint_ids) != len(set(self.dependency_endpoint_ids)):
+            raise ValueError("dependency endpoint IDs must be unique")
+        if self.health_endpoint_id in self.dependency_endpoint_ids:
+            raise ValueError("application health cannot be its own dependency")
+        for pair in (
+            (self.queue_endpoint_id, self.queue_max_depth),
+            (self.queue_endpoint_id, self.queue_max_age_seconds),
+            (self.config_storage_id, self.expected_config_sha256),
+            (self.version_storage_id, self.expected_version),
+        ):
+            if (pair[0] is None) != (pair[1] is None):
+                raise ValueError(
+                    "application source and expected value must be configured together"
+                )
+        return self
+
+
 class Host(StrictModel):
     address: str = Field(min_length=1, max_length=253)
     port: int = Field(default=22, ge=1, le=65535)
@@ -199,6 +234,39 @@ class Host(StrictModel):
     host_key_alias: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9_.:-]{1,253}$")
     probe_targets: dict[str, ProbeTarget] = Field(default_factory=dict, max_length=64)
     storage_targets: dict[str, StorageTarget] = Field(default_factory=dict, max_length=64)
+    applications: dict[str, ApplicationProfile] = Field(default_factory=dict, max_length=16)
+
+    @model_validator(mode="after")
+    def valid_applications(self) -> Host:
+        for name, app in self.applications.items():
+            if not re.fullmatch(r"[a-z][a-z0-9_-]{1,62}", name):
+                raise ValueError("application IDs must be lowercase inventory aliases")
+            for endpoint_id in [app.health_endpoint_id, *app.dependency_endpoint_ids]:
+                if endpoint_id not in self.probe_targets:
+                    raise ValueError("application endpoint must exist in host probe targets")
+            if self.probe_targets[app.health_endpoint_id].protocol not in {"http", "https"}:
+                raise ValueError("application health endpoint must use HTTP or HTTPS")
+            if (
+                self.probe_targets[app.health_endpoint_id].protocol == "https"
+                and self.probe_targets[app.health_endpoint_id].dns_name is None
+            ):
+                raise ValueError("HTTPS application health requires a pinned DNS name")
+            if app.queue_endpoint_id is not None and (
+                app.queue_endpoint_id not in self.probe_targets
+                or self.probe_targets[app.queue_endpoint_id].protocol not in {"http", "https"}
+            ):
+                raise ValueError("application queue endpoint must use HTTP or HTTPS")
+            if app.queue_endpoint_id is not None:
+                queue = self.probe_targets[app.queue_endpoint_id]
+                if queue.protocol == "https" and queue.dns_name is None:
+                    raise ValueError("HTTPS application queue requires a pinned DNS name")
+            for storage_id in (app.config_storage_id, app.version_storage_id):
+                if storage_id is not None and (
+                    storage_id not in self.storage_targets
+                    or self.storage_targets[storage_id].kind != "file"
+                ):
+                    raise ValueError("application artifact must be a registered file target")
+        return self
 
     @field_validator("address")
     @classmethod
@@ -242,6 +310,16 @@ class HostPolicy(StrictModel):
     allowed_probe_targets: list[str] = Field(default_factory=list)
     allowed_storage_targets: list[str] = Field(default_factory=list)
     allowed_storage_paths: list[str] = Field(default_factory=list, max_length=64)
+    allowed_applications: list[str] = Field(default_factory=list, max_length=16)
+
+    @field_validator("allowed_applications")
+    @classmethod
+    def safe_application_names(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)) or any(
+            not re.fullmatch(r"[a-z][a-z0-9_-]{1,62}", name) for name in value
+        ):
+            raise ValueError("allowed application IDs must be unique lowercase inventory aliases")
+        return value
 
     @field_validator("allowed_storage_paths")
     @classmethod

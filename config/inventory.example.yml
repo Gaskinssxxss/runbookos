@@ -19,6 +19,26 @@ hosts:
     role: application-server
     ssh_profile: default
     host_key_alias: example-app-01
+    # Register only reviewed private endpoints and non-secret file metadata.
+    # probe_targets:
+    #   app_health: {protocol: http, address: 10.1.2.3, port: 8080, path: /health}
+    #   queue_health: {protocol: http, address: 10.1.2.3, port: 8080, path: /metrics}
+    #   upstream: {protocol: tcp, address: 10.1.2.4, port: 9000}
+    # storage_targets:
+    #   app_config: {path: /opt/example/app/config.public, kind: file}
+    #   app_version: {path: /opt/example/app/VERSION, kind: file}
+    # applications:
+    #   app_demo:
+    #     health_endpoint_id: app_health
+    #     dependency_endpoint_ids: [upstream]
+    #     queue_endpoint_id: queue_health
+    #     queue_max_depth: 10
+    #     queue_max_age_seconds: 60
+    #     worker_unit: example-worker.service
+    #     config_storage_id: app_config
+    #     expected_config_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+    #     version_storage_id: app_version
+    #     expected_version: 1.2.3
   example-db-01:
     address: 192.0.2.12
     port: 22

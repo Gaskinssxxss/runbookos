@@ -4,9 +4,84 @@ import base64
 import json
 import shlex
 
-REMOTE_SOURCE = r"""import base64, http.client, ipaddress, json, os, re, selectors, socket, ssl, stat, struct, subprocess, sys, time
+REMOTE_SOURCE = r"""import base64, hashlib, http.client, ipaddress, json, os, re, selectors, socket, ssl, stat, struct, subprocess, sys, time
 def emit(ok, data=None, error=None, uncertain=False):
     print(json.dumps({"ok": ok, "data": data or {}, "error": error, "uncertain": uncertain}, separators=(",", ":")))
+def application_diagnostic(action,args,timeout):
+    app_id=args.get("application_id"); app=args.get("_application")
+    if not isinstance(app_id,str) or not re.fullmatch(r"[a-z][a-z0-9_-]{1,62}",app_id) or not isinstance(app,dict): raise ValueError("application identity denied")
+    if not isinstance(timeout,int) or isinstance(timeout,bool) or not 1<=timeout<=10: raise ValueError("application timeout denied")
+    start=time.monotonic()
+    if action in ("application.health","application.queue_health"):
+        endpoint=args.get("_endpoint")
+        if not isinstance(endpoint,dict) or not {"protocol","address","port","path"}<=set(endpoint): raise ValueError("application endpoint denied")
+        protocol=endpoint.get("protocol"); address=endpoint.get("address"); port=endpoint.get("port"); path=endpoint.get("path"); name=endpoint.get("dns_name")
+        if protocol not in ("http","https") or not valid_private_ipv4(address) or type(port) is not int or not 1<=port<=65535 or not isinstance(path,str) or not re.fullmatch(r"/[A-Za-z0-9_./-]{0,127}",path) or path.startswith("//") or ".." in path.split("/"): raise ValueError("application endpoint denied")
+        if name is not None and not valid_dns_name(name): raise ValueError("application hostname denied")
+        if protocol=="https" and name is None: raise ValueError("TLS hostname denied")
+        expected_id=app.get("health_endpoint_id") if action=="application.health" else app.get("queue_endpoint_id")
+        if args.get("_endpoint_id")!=expected_id: raise ValueError("application endpoint binding denied")
+        data={"application_id":app_id,"endpoint_id":expected_id,"http_status":None,"status":"unknown","redirect_followed":False,"body_bytes_sampled":0,"tls_verified":False,"duration_seconds":None}
+        connection=http.client.HTTPConnection(address,port,timeout=timeout)
+        try:
+            if protocol=="https":
+                connection.connect()
+                connection.sock=ssl.create_default_context().wrap_socket(connection.sock,server_hostname=name)
+                data["tls_verified"]=True
+            connection.request("GET",path,headers={"Connection":"close","Host":name or address,"User-Agent":"RunbookOS-application/1"})
+            response=connection.getresponse(); code=response.status
+            data["http_status"]=code
+            if action=="application.health":
+                content_type=response.getheader("Content-Type","").split(";",1)[0].strip().lower()
+                data["content_type_category"]="json" if content_type=="application/json" else "html" if content_type=="text/html" else "text" if content_type=="text/plain" else "other" if content_type else "missing"
+                data["status"]="healthy" if 200<=code<300 else "redirect" if 300<=code<400 else "unhealthy"
+            else:
+                depth=response.getheader("X-Queue-Depth"); age=response.getheader("X-Queue-Oldest-Age-Seconds")
+                max_depth=app.get("queue_max_depth"); max_age=app.get("queue_max_age_seconds")
+                if type(max_depth) is not int or type(max_age) is not int or not 0<=max_depth<=1000000 or not 0<=max_age<=86400: raise ValueError("queue bounds denied")
+                if 200<=code<300 and isinstance(depth,str) and isinstance(age,str) and re.fullmatch(r"[0-9]{1,7}",depth) and re.fullmatch(r"[0-9]{1,7}",age) and int(depth)<=1000000 and int(age)<=86400:
+                    data["depth"]=int(depth); data["oldest_age_seconds"]=int(age)
+                    data["status"]="backlog" if data["depth"]>max_depth or data["oldest_age_seconds"]>max_age else "healthy"
+                elif not 200<=code<300: data["status"]="unhealthy"
+            return data,None
+        except (TimeoutError,socket.timeout): return data,"timeout"
+        except ssl.SSLError: return data,"tls_invalid"
+        except (OSError,http.client.HTTPException): return data,"endpoint_unavailable"
+        finally:
+            data["duration_seconds"]=round(time.monotonic()-start,3)
+            connection.close()
+    storage=args.get("_storage")
+    if not isinstance(storage,dict) or set(storage)!={"path","kind"} or storage.get("kind")!="file": raise ValueError("application artifact denied")
+    path=storage.get("path")
+    if not isinstance(path,str) or not path.startswith("/") or path.startswith("//") or path.endswith("/") or any(part in ("",".","..") for part in path.split("/")[1:]) or len(path)>256: raise ValueError("application artifact path denied")
+    expected_id=app.get("config_storage_id") if action=="application.config_fingerprint" else app.get("version_storage_id")
+    if args.get("_storage_id")!=expected_id: raise ValueError("application artifact binding denied")
+    data={"application_id":app_id,"storage_id":expected_id,"status":"unknown","contents_included":False,"duration_seconds":None}
+    limit=65536 if action=="application.config_fingerprint" else 64
+    try:
+        parent=storage_fd(os.path.dirname(path),True)
+        try: fd=os.open(os.path.basename(path),os.O_RDONLY|os.O_NONBLOCK|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=parent)
+        finally: os.close(parent)
+        try:
+            info=os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_size>limit: return data,"artifact_unavailable"
+            content=os.read(fd,limit+1)
+            after=os.fstat(fd)
+            if len(content)!=info.st_size or (after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns)!=(info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns): return data,"artifact_changed"
+        finally: os.close(fd)
+        if action=="application.config_fingerprint":
+            expected=app.get("expected_config_sha256")
+            if not isinstance(expected,str) or not re.fullmatch(r"[a-f0-9]{64}",expected): raise ValueError("config baseline denied")
+            data["sha256"]=hashlib.sha256(content).hexdigest(); data["status"]="matched" if data["sha256"]==expected else "drift"
+        else:
+            expected=app.get("expected_version")
+            if not isinstance(expected,str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,63}",expected): raise ValueError("version baseline denied")
+            version=content.decode("ascii").strip()
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,63}",version): return data,"invalid_version_metadata"
+            data["version"]=version; data["status"]="matched" if version==expected else "drift"
+        return data,None
+    except (OSError,UnicodeError): return data,"artifact_unavailable"
+    finally: data["duration_seconds"]=round(time.monotonic()-start,3)
 def probe_endpoint(action, args, timeout):
     endpoint=args.get("_endpoint")
     if not isinstance(endpoint,dict) or set(endpoint) not in ({"protocol","address","port","path"},{"protocol","address","port","path","dns_name","resolver_address"},{"protocol","address","port","path","dns_name","resolver_address","local_listener"}): raise ValueError("invalid endpoint")
@@ -927,6 +1002,9 @@ try:
     elif action == "network.firewall_summary":
         data,error=firewall_summary(timeout)
         emit(error is None,data,error,error is not None)
+    elif action in ("application.health","application.queue_health","application.config_fingerprint","application.deploy_version"):
+        data,error=application_diagnostic(action,args,timeout)
+        emit(error is None,data,error,error is not None or data.get("status")=="unknown")
     elif action in ("network.tcp_connect","network.reachability","http.readiness","postgresql.protocol_available","network.dns_resolve","network.listener","network.tls_certificate"):
         data,error=probe_endpoint(action,args,timeout)
         if action in ("network.tcp_connect","network.reachability","http.readiness","postgresql.protocol_available"): emit(True,data,error)

@@ -30,6 +30,8 @@ AI investigation sends the incident description and bounded diagnostic evidence 
 
 Storage diagnostics use per-host inventory aliases and an explicit policy allowlist. The usage walker uses descriptor-relative access without following symlinks, skips known mountpoints and other devices, deduplicates hardlinks, and stops on time or entry limits. It reads metadata only. Incomplete or inaccessible inventories remain unknown; even complete correlation signals are observations, not verified causal findings. Path names, permissions and file sizes can be sensitive metadata, so register only reviewed roots and restrict access to stored evidence. These actions never delete files, remount volumes, repair filesystems or authorize remediation.
 
+Application diagnostics require an inventory application profile and per-host `allowed_applications`, plus separate endpoint or storage alias allows. HTTP and queue probes connect only to pinned private IPv4 endpoints, never follow redirects, and omit bodies, cookies and arbitrary headers. HTTPS requires a pinned hostname and system trust verification. Queue metrics accept only bounded numeric headers. Fingerprint and version probes open only registered regular files through no-follow descriptor traversal; the fingerprint probe emits a hash, never file content. Only non-secret metadata files should be registered. A source timeout, missing metric or unreadable file remains unknown. Correlation retains step provenance and never marks a root cause verified. No application diagnostic grants remediation authority.
+
 ## Residual risks
 
 - The local operator controls policy, identity, state DB, provider config, and approval; RunbookOS does not provide multi-person approvals, MFA, remote policy signatures, or an HSM.

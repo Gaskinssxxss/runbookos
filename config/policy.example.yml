@@ -44,9 +44,13 @@ hosts:
     allowed_units:
       - nginx.service
   example-app-01:
-    diagnostic_actions: [systemd.is_active, systemd.service_status, systemd.failed_units, systemd.journal_summary, systemd.timers, os.uptime, os.cpu, os.release, os.memory, os.disk, os.packages, os.cron, process.list, process.inspect, process.tree, filesystem.mounts, filesystem.inodes]
+    diagnostic_actions: [systemd.is_active, systemd.service_status, systemd.failed_units, systemd.journal_summary, systemd.timers, os.uptime, os.cpu, os.release, os.memory, os.disk, os.packages, os.cron, process.list, process.inspect, process.tree, filesystem.mounts, filesystem.inodes, network.tcp_connect, network.tls_certificate, filesystem.pressure, application.health, application.queue_health, application.config_fingerprint, application.deploy_version]
     remediation_actions: []
     allowed_storage_paths: ["/"]
+    # Add reviewed IDs only after registering exact sources in private inventory.
+    allowed_applications: []
+    allowed_probe_targets: []
+    allowed_storage_targets: []
     allowed_units: [runbookos-sample.service]
   example-db-01:
     diagnostic_actions: [systemd.is_active, systemd.service_status, systemd.failed_units, systemd.journal_summary, systemd.timers, os.uptime, os.cpu, os.release, os.memory, os.disk, os.packages, os.cron, process.list, filesystem.mounts, filesystem.inodes]
