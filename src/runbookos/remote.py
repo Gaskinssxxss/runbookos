@@ -9,9 +9,9 @@ def emit(ok, data=None, error=None, uncertain=False):
     print(json.dumps({"ok": ok, "data": data or {}, "error": error, "uncertain": uncertain}, separators=(",", ":")))
 PG_QUERIES={
     "readiness": "SELECT json_build_object('query_succeeded',true,'in_recovery',pg_is_in_recovery())::text",
-    "connections": "SELECT json_build_object('stats_visible',pg_has_role(current_user,'pg_read_all_stats','MEMBER'),'active',count(*) FILTER (WHERE state='active'),'idle',count(*) FILTER (WHERE state='idle'),'total',count(*),'max_connections',current_setting('max_connections')::int,'superuser_reserved',current_setting('superuser_reserved_connections')::int)::text FROM pg_stat_activity",
+    "connections": "SELECT json_build_object('stats_visible',pg_has_role(current_user,'pg_read_all_stats','MEMBER'),'active',count(*) FILTER (WHERE state='active'),'idle',count(*) FILTER (WHERE state='idle'),'total',count(*),'max_connections',current_setting('max_connections')::int,'superuser_reserved',current_setting('superuser_reserved_connections')::int,'reserved_connections',coalesce(current_setting('reserved_connections',true)::int,0))::text FROM pg_stat_activity",
     "replication": "SELECT json_build_object('stats_visible',pg_has_role(current_user,'pg_read_all_stats','MEMBER'),'in_recovery',pg_is_in_recovery(),'sender_count',(SELECT count(*) FROM pg_stat_replication),'receiver_count',(SELECT count(*) FROM pg_stat_wal_receiver),'max_replay_lag_seconds',(SELECT max(extract(epoch from replay_lag)) FROM pg_stat_replication))::text",
-    "sessions": "SELECT json_build_object('stats_visible',pg_has_role(current_user,'pg_read_all_stats','MEMBER'),'active',count(*) FILTER (WHERE state='active'),'idle',count(*) FILTER (WHERE state='idle'),'long_transaction_count',count(*) FILTER (WHERE xact_start IS NOT NULL AND clock_timestamp()-xact_start > interval '5 minutes'),'waiting_count',count(*) FILTER (WHERE wait_event_type IS NOT NULL),'oldest_transaction_seconds',max(extract(epoch from clock_timestamp()-xact_start)))::text FROM pg_stat_activity",
+    "sessions": "SELECT json_build_object('stats_visible',pg_has_role(current_user,'pg_read_all_stats','MEMBER'),'active',count(*) FILTER (WHERE state='active'),'idle',count(*) FILTER (WHERE state='idle'),'long_transaction_count',count(*) FILTER (WHERE xact_start IS NOT NULL AND clock_timestamp()-xact_start > interval '5 minutes'),'long_query_count',count(*) FILTER (WHERE state='active' AND query_start IS NOT NULL AND clock_timestamp()-query_start > interval '5 minutes'),'waiting_count',count(*) FILTER (WHERE wait_event_type IS NOT NULL),'oldest_transaction_seconds',max(extract(epoch from clock_timestamp()-xact_start)))::text FROM pg_stat_activity",
 }
 def bounded_postgresql(argv,env,timeout):
     try: process=subprocess.Popen(argv,env=env,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,close_fds=True,start_new_session=True)
@@ -74,13 +74,13 @@ def postgresql_inspect(args,timeout):
         if '\n' in line: raise ValueError('multiple rows')
         values=json.loads(line)
         if not isinstance(values,dict): raise ValueError('invalid row')
-        fields={'readiness':{'query_succeeded','in_recovery'},'connections':{'stats_visible','active','idle','total','max_connections','superuser_reserved'},'replication':{'stats_visible','in_recovery','sender_count','receiver_count','max_replay_lag_seconds'},'sessions':{'stats_visible','active','idle','long_transaction_count','waiting_count','oldest_transaction_seconds'}}[check]
+        fields={'readiness':{'query_succeeded','in_recovery'},'connections':{'stats_visible','active','idle','total','max_connections','superuser_reserved','reserved_connections'},'replication':{'stats_visible','in_recovery','sender_count','receiver_count','max_replay_lag_seconds'},'sessions':{'stats_visible','active','idle','long_transaction_count','long_query_count','waiting_count','oldest_transaction_seconds'}}[check]
         if set(values)!=fields or any(type(v) not in (int,float,bool,type(None)) for v in values.values()): raise ValueError('invalid fields')
         if any(type(v) in (int,float) and (not math.isfinite(v) or v<0 or v>1000000000) for v in values.values()): raise ValueError('invalid value')
         if check=='readiness' and (values['query_succeeded'] is not True or type(values['in_recovery']) is not bool): raise ValueError('invalid readiness')
         if check!='readiness' and type(values['stats_visible']) is not bool: raise ValueError('invalid privilege status')
-        if check=='connections' and any(type(values[k]) is not int for k in ('active','idle','total','max_connections','superuser_reserved')): raise ValueError('invalid connection counts')
-        if check=='sessions' and (any(type(values[k]) is not int for k in ('active','idle','long_transaction_count','waiting_count')) or values['oldest_transaction_seconds'] is not None and type(values['oldest_transaction_seconds']) not in (int,float)): raise ValueError('invalid session counts')
+        if check=='connections' and any(type(values[k]) is not int for k in ('active','idle','total','max_connections','superuser_reserved','reserved_connections')): raise ValueError('invalid connection counts')
+        if check=='sessions' and (any(type(values[k]) is not int for k in ('active','idle','long_transaction_count','long_query_count','waiting_count')) or values['oldest_transaction_seconds'] is not None and type(values['oldest_transaction_seconds']) not in (int,float)): raise ValueError('invalid session counts')
         if check=='replication' and (type(values['in_recovery']) is not bool or any(type(values[k]) is not int for k in ('sender_count','receiver_count')) or values['max_replay_lag_seconds'] is not None and type(values['max_replay_lag_seconds']) not in (int,float)): raise ValueError('invalid replication counts')
     except (UnicodeError,ValueError): return data,'invalid_query_response'
     data.update(values); data['query_succeeded']=True; data['status']='observed'
@@ -89,7 +89,7 @@ def postgresql_inspect(args,timeout):
         for field in fields-{'stats_visible'}: data.pop(field,None)
         return data,'statistics_privilege_unavailable'
     if check=='connections':
-        maximum=values['max_connections']; reserved=values['superuser_reserved']; total=values['total']
+        maximum=values['max_connections']; reserved=values['superuser_reserved']+values['reserved_connections']; total=values['total']
         if not all(type(v) is int for v in (maximum,reserved,total,values['active'],values['idle'])) or maximum<=0 or reserved>=maximum: return data,'invalid_query_response'
         data['utilization_percent']=round(total*100/maximum,2); data['possible_exhaustion']=total>=maximum-reserved
     if check=='replication':

@@ -164,7 +164,7 @@ def test_readiness_uses_fixed_query_and_sanitized_environment(monkeypatch, capsy
     [
         (
             "connections",
-            b'{"stats_visible":true,"active":9,"idle":1,"total":10,"max_connections":10,"superuser_reserved":1}',
+            b'{"stats_visible":true,"active":9,"idle":1,"total":10,"max_connections":10,"superuser_reserved":1,"reserved_connections":0}',
             "possible_exhaustion",
         ),
         (
@@ -174,7 +174,7 @@ def test_readiness_uses_fixed_query_and_sanitized_environment(monkeypatch, capsy
         ),
         (
             "sessions",
-            b'{"stats_visible":true,"active":2,"idle":3,"long_transaction_count":1,"waiting_count":2,"oldest_transaction_seconds":450}',
+            b'{"stats_visible":true,"active":2,"idle":3,"long_transaction_count":1,"long_query_count":1,"waiting_count":2,"oldest_transaction_seconds":450}',
             "waiting_count",
         ),
     ],
@@ -185,6 +185,20 @@ def test_bounded_aggregate_checks(monkeypatch, capsys, check, payload, signal):
     result = remote(monkeypatch, capsys, check)
     assert result["ok"] and result["data"][signal]
     assert "query_text" not in json.dumps(result)
+    if check == "sessions":
+        assert result["data"]["long_query_count"] == 1
+
+
+def test_reserved_capacity_contributes_to_pressure(monkeypatch, capsys):
+    authorized_files(monkeypatch)
+    response(
+        monkeypatch,
+        b'{"stats_visible":true,"active":6,"idle":2,"total":8,"max_connections":10,"superuser_reserved":1,"reserved_connections":1}',
+    )
+    result = remote(monkeypatch, capsys, "connections")
+    assert result["ok"]
+    assert result["data"]["possible_exhaustion"] is True
+    assert result["data"]["utilization_percent"] == 80.0
 
 
 @pytest.mark.parametrize(
@@ -210,7 +224,7 @@ def test_missing_stats_privilege_is_unknown(monkeypatch, capsys):
     authorized_files(monkeypatch)
     response(
         monkeypatch,
-        b'{"stats_visible":false,"active":1,"idle":1,"total":2,"max_connections":100,"superuser_reserved":3}',
+        b'{"stats_visible":false,"active":1,"idle":1,"total":2,"max_connections":100,"superuser_reserved":3,"reserved_connections":0}',
     )
     result = remote(monkeypatch, capsys, "connections")
     assert result["error"] == "statistics_privilege_unavailable"
@@ -347,11 +361,11 @@ def test_sql_timeout_and_malformed_values_fail_closed(monkeypatch, capsys):
     assert remote(monkeypatch, capsys, timeout=1)["error"] == "query_timeout"
     response(
         monkeypatch,
-        b'{"stats_visible":true,"active":1,"idle":0,"total":1,"max_connections":100,"superuser_reserved":true}',
+        b'{"stats_visible":true,"active":1,"idle":0,"total":1,"max_connections":100,"superuser_reserved":true,"reserved_connections":0}',
     )
     assert remote(monkeypatch, capsys, "connections")["error"] == "invalid_query_response"
     response(
         monkeypatch,
-        b'{"stats_visible":true,"active":1,"idle":0,"total":1,"max_connections":100,"superuser_reserved":NaN}',
+        b'{"stats_visible":true,"active":1,"idle":0,"total":1,"max_connections":100,"superuser_reserved":NaN,"reserved_connections":0}',
     )
     assert remote(monkeypatch, capsys, "connections")["error"] == "invalid_query_response"

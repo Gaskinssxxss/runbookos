@@ -63,9 +63,9 @@ If the controller process stops, inspect SQLite history. If a row remains `runni
 | --- | --- | --- | --- |
 | `postgresql.protocol_available` | Pinned endpoint SSL negotiation | `protocol_available`, `ssl_supported`; no authentication | TCP or protocol failure |
 | `postgresql.inspect` `readiness` | Fixed `pg_is_in_recovery()` SQL | Authenticated query success and role flag | Credential, TLS, authentication, query failure |
-| `postgresql.inspect` `connections` | `pg_stat_activity`, fixed settings | Active/idle/total, capacity, utilization, possible exhaustion | Missing stats privilege, malformed response, timeout |
+| `postgresql.inspect` `connections` | `pg_stat_activity`, fixed settings | Active/idle/total, maximum and reserved capacity, utilization, possible exhaustion | Missing stats privilege, malformed response, timeout |
 | `postgresql.inspect` `replication` | `pg_stat_replication`, `pg_stat_wal_receiver` | Primary/standby and observed peer counts/lag | Missing privilege or peer evidence; standalone is not failed replication |
-| `postgresql.inspect` `sessions` | Aggregate `pg_stat_activity` | State counts, long transactions, waits, oldest age | Missing privilege or statistics |
+| `postgresql.inspect` `sessions` | Aggregate `pg_stat_activity` | State counts, long transactions and queries, waits, oldest age | Missing privilege or statistics |
 
 All checks use only inventory aliases and per-host default-deny policy. Diagnostic execution success means the observation was captured; it does not mean the database is healthy. Database correlation remains endpoint-scoped with step references and `verified_root_cause: false`. Run the read-only [example](../examples/runbooks/database-data-review.yml) only after configuring a trusted private source and policy. RunbookOS SQLite `state backup` below concerns controller state, **not** PostgreSQL application-database backups; those remain outside this R1 package.
 
