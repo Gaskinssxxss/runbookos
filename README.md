@@ -80,6 +80,8 @@ The default inventory uses reserved documentation addresses from `192.0.2.0/24` 
 
 The read-only Network/DNS/TLS example (`examples/runbooks/network-dns-tls-review.yml`) requires a private inventory `probe_targets.service_health` entry with fixed `protocol: https`, private IPv4 `address`, `port`, fixed `path`, `dns_name`, and private IPv4 `resolver_address`. The matching host policy must allow both the action IDs and `allowed_probe_targets: [service_health]`. The shipped inventory deliberately omits an executable endpoint. DNS compares A records with the configured address; TLS connects to that address and verifies the configured name with the system trust store. The example omits `network.listener`, which inspects sockets on the observed SSH host and requires a separately scoped local endpoint (`local_listener: true`). Neither result alone establishes an incident root cause.
 
+The read-only storage example (`examples/runbooks/storage-filesystem-review.yml`) uses fixed inventory `storage_targets` aliases and per-host `allowed_storage_targets`. Legacy `os.disk` and `filesystem.inodes` explicit paths require a separate per-host `allowed_storage_paths` entry; the shipped example policy permits only `/`. It distinguishes byte and inode pressure, expected mounts, path metadata, bounded usage and two-snapshot log growth. The shipped inventory keeps these targets commented out, so operators must register reviewed paths privately before planning can allow the example. See [operations](docs/operations.md) for limits and unknown-state handling.
+
 ```sh
 export RUNBOOKOS_SSH_KEY="$HOME/.ssh/runbookos-readonly"
 export RUNBOOKOS_KNOWN_HOSTS="$HOME/.ssh/runbookos_known_hosts"

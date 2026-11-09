@@ -1,0 +1,29 @@
+api_version: runbookos/v1
+kind: Runbook
+metadata:
+  id: storage-filesystem-review
+  name: Scoped storage and filesystem review
+  description: Read-only review of explicitly registered storage targets.
+  risk: low
+targets: [example-web-01]
+steps:
+  - id: pressure
+    action: filesystem.pressure
+    with: {storage_id: web_logs}
+    timeout_seconds: 3
+  - id: mount
+    action: filesystem.mount_status
+    with: {storage_id: web_mount}
+    timeout_seconds: 5
+  - id: metadata
+    action: filesystem.path_metadata
+    with: {storage_id: web_access}
+    timeout_seconds: 3
+  - id: usage
+    action: filesystem.usage_summary
+    with: {storage_id: web_logs, max_entries: 256}
+    timeout_seconds: 5
+  - id: growth
+    action: filesystem.log_growth
+    with: {storage_id: web_access, interval_seconds: 1}
+    timeout_seconds: 5

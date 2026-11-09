@@ -58,11 +58,37 @@ class FilesystemPathArguments(BaseModel):
     def absolute_normal_path(cls, value: str) -> str:
         if (
             not value.startswith("/")
+            or value.startswith("//")
+            or (value != "/" and value.endswith("/"))
             or any(character in value for character in "\x00\n\r")
-            or ".." in value.split("/")
+            or any(part in {"", ".", ".."} for part in value.split("/")[1:])
+            and value != "/"
         ):
             raise ValueError("path must be an absolute normalized path")
         return value
+
+
+class DiskArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    path: str = "/"
+
+    @field_validator("path")
+    @classmethod
+    def absolute_normal_path(cls, value: str) -> str:
+        return FilesystemPathArguments.absolute_normal_path(value)
+
+
+class StorageTargetArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    storage_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{1,62}$")
+
+
+class StorageUsageArguments(StorageTargetArguments):
+    max_entries: int = Field(default=256, ge=1, le=1024)
+
+
+class LogGrowthArguments(StorageTargetArguments):
+    interval_seconds: int = Field(default=1, ge=1, le=3)
 
 
 class BoundedListArguments(BaseModel):
@@ -296,7 +322,14 @@ REGISTRY: dict[str, ActionDefinition] = {
     "os.cpu": ActionDefinition("os.cpu", True, frozenset(), max_timeout_seconds=3),
     "os.release": ActionDefinition("os.release", True, frozenset(), max_timeout_seconds=3),
     "os.memory": ActionDefinition("os.memory", True, frozenset()),
-    "os.disk": ActionDefinition("os.disk", True, frozenset(), frozenset({"path"})),
+    "os.disk": ActionDefinition(
+        "os.disk",
+        True,
+        frozenset(),
+        frozenset({"path"}),
+        arguments_model=DiskArguments,
+        max_timeout_seconds=15,
+    ),
     "os.packages": ActionDefinition(
         "os.packages",
         True,
@@ -345,6 +378,43 @@ REGISTRY: dict[str, ActionDefinition] = {
         frozenset({"path"}),
         arguments_model=FilesystemPathArguments,
         max_timeout_seconds=3,
+    ),
+    "filesystem.mount_status": ActionDefinition(
+        "filesystem.mount_status",
+        True,
+        frozenset({"storage_id"}),
+        arguments_model=StorageTargetArguments,
+        max_timeout_seconds=5,
+    ),
+    "filesystem.pressure": ActionDefinition(
+        "filesystem.pressure",
+        True,
+        frozenset({"storage_id"}),
+        arguments_model=StorageTargetArguments,
+        max_timeout_seconds=3,
+    ),
+    "filesystem.path_metadata": ActionDefinition(
+        "filesystem.path_metadata",
+        True,
+        frozenset({"storage_id"}),
+        arguments_model=StorageTargetArguments,
+        max_timeout_seconds=3,
+    ),
+    "filesystem.usage_summary": ActionDefinition(
+        "filesystem.usage_summary",
+        True,
+        frozenset({"storage_id"}),
+        frozenset({"max_entries"}),
+        arguments_model=StorageUsageArguments,
+        max_timeout_seconds=5,
+    ),
+    "filesystem.log_growth": ActionDefinition(
+        "filesystem.log_growth",
+        True,
+        frozenset({"storage_id"}),
+        frozenset({"interval_seconds"}),
+        arguments_model=LogGrowthArguments,
+        max_timeout_seconds=5,
     ),
     "network.interfaces": ActionDefinition(
         "network.interfaces", True, frozenset(), max_timeout_seconds=15

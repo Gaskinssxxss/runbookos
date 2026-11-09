@@ -561,11 +561,13 @@ def test_example_server_os_runbooks_and_policy_parse_and_plan(tmp_path: Path):
         "example-web-01": {
             "diagnostic_actions": web,
             "remediation_actions": [],
+            "allowed_storage_paths": ["/"],
             "allowed_units": ["nginx.service"],
         },
         "example-app-01": {
             "diagnostic_actions": web + ["process.inspect", "process.tree"],
             "remediation_actions": [],
+            "allowed_storage_paths": ["/"],
             "allowed_units": ["runbookos-sample.service"],
         },
     }

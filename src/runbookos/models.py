@@ -171,6 +171,25 @@ class ProbeTarget(StrictModel):
         return self
 
 
+class StorageTarget(StrictModel):
+    path: str = Field(min_length=1, max_length=256)
+    kind: Literal["directory", "file", "mount"]
+
+    @field_validator("path")
+    @classmethod
+    def safe_path(cls, value: str) -> str:
+        if (
+            not value.startswith("/")
+            or value.startswith("//")
+            or value != "/"
+            and value.endswith("/")
+            or any(part in {"", ".", ".."} for part in value.split("/")[1:])
+            or any(character in value for character in "\x00\n\r")
+        ):
+            raise ValueError("storage target must be a normalized absolute path")
+        return value
+
+
 class Host(StrictModel):
     address: str = Field(min_length=1, max_length=253)
     port: int = Field(default=22, ge=1, le=65535)
@@ -179,6 +198,7 @@ class Host(StrictModel):
     ssh_profile: str = Field(pattern=r"^[a-z][a-z0-9_-]{1,62}$")
     host_key_alias: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9_.:-]{1,253}$")
     probe_targets: dict[str, ProbeTarget] = Field(default_factory=dict, max_length=64)
+    storage_targets: dict[str, StorageTarget] = Field(default_factory=dict, max_length=64)
 
     @field_validator("address")
     @classmethod
@@ -202,6 +222,13 @@ class Host(StrictModel):
             raise ValueError("probe target IDs must be lowercase inventory aliases")
         return value
 
+    @field_validator("storage_targets")
+    @classmethod
+    def safe_storage_target_names(cls, value: dict[str, StorageTarget]) -> dict[str, StorageTarget]:
+        if any(not re.fullmatch(r"[a-z][a-z0-9_-]{1,62}", name) for name in value):
+            raise ValueError("storage target IDs must be lowercase inventory aliases")
+        return value
+
 
 class Inventory(StrictModel):
     schema_version: Literal[1]
@@ -213,6 +240,31 @@ class HostPolicy(StrictModel):
     remediation_actions: list[str] = Field(default_factory=list)
     allowed_units: list[str] = Field(default_factory=list)
     allowed_probe_targets: list[str] = Field(default_factory=list)
+    allowed_storage_targets: list[str] = Field(default_factory=list)
+    allowed_storage_paths: list[str] = Field(default_factory=list, max_length=64)
+
+    @field_validator("allowed_storage_paths")
+    @classmethod
+    def safe_storage_paths(cls, value: list[str]) -> list[str]:
+        for path in value:
+            if (
+                not isinstance(path, str)
+                or len(path) > 256
+                or (
+                    path != "/"
+                    and (
+                        not path.startswith("/")
+                        or path.startswith("//")
+                        or path.endswith("/")
+                        or any(part in {"", ".", ".."} for part in path.split("/")[1:])
+                    )
+                )
+                or any(char in path for char in "\x00\n\r")
+            ):
+                raise ValueError("allowed storage paths must be normalized absolute paths")
+        if len(value) != len(set(value)):
+            raise ValueError("allowed storage paths must be unique")
+        return value
 
 
 class ApprovalPolicy(StrictModel):

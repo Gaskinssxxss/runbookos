@@ -28,6 +28,8 @@ Incident resolution is an operator decision. Resolution with `evidence_status=ve
 
 AI investigation sends the incident description and bounded diagnostic evidence to the configured provider. A local model service should bind to `127.0.0.1`; do not expose its listener publicly. If inference is remote, use an authenticated, narrowly scoped transport approved for that environment. Prompt-injection text may still influence model prose, so no generated recommendation is executed and hypotheses must cite actual engine evidence. The detector for suspicious instructions is heuristic; the capability boundary and engine policy are the security controls.
 
+Storage diagnostics use per-host inventory aliases and an explicit policy allowlist. The usage walker uses descriptor-relative access without following symlinks, skips known mountpoints and other devices, deduplicates hardlinks, and stops on time or entry limits. It reads metadata only. Incomplete or inaccessible inventories remain unknown; even complete correlation signals are observations, not verified causal findings. Path names, permissions and file sizes can be sensitive metadata, so register only reviewed roots and restrict access to stored evidence. These actions never delete files, remount volumes, repair filesystems or authorize remediation.
+
 ## Residual risks
 
 - The local operator controls policy, identity, state DB, provider config, and approval; RunbookOS does not provide multi-person approvals, MFA, remote policy signatures, or an HSM.
