@@ -1,0 +1,33 @@
+api_version: runbookos/v1
+kind: Runbook
+metadata:
+  id: application-web-review
+  name: Application and upstream review
+  description: Read-only review of one registered application and dependency.
+  risk: low
+targets: [example-app-01]
+steps:
+  - id: upstream
+    action: network.tcp_connect
+    with: {endpoint_id: upstream}
+    timeout_seconds: 10
+  - id: worker
+    action: systemd.service_status
+    with: {unit: example-worker.service}
+    timeout_seconds: 10
+  - id: config
+    action: application.config_fingerprint
+    with: {application_id: app_demo}
+    timeout_seconds: 3
+  - id: version
+    action: application.deploy_version
+    with: {application_id: app_demo}
+    timeout_seconds: 3
+  - id: health
+    action: application.health
+    with: {application_id: app_demo}
+    timeout_seconds: 10
+  - id: queue
+    action: application.queue_health
+    with: {application_id: app_demo}
+    timeout_seconds: 10

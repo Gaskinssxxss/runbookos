@@ -14,6 +14,11 @@ class ProbeArguments(BaseModel):
     endpoint_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{1,62}$")
 
 
+class ApplicationArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    application_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{1,62}$")
+
+
 class JournalTailArguments(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -166,6 +171,34 @@ class ActionDefinition:
 
 
 REGISTRY: dict[str, ActionDefinition] = {
+    "application.health": ActionDefinition(
+        "application.health",
+        True,
+        frozenset({"application_id"}),
+        arguments_model=ApplicationArguments,
+        max_timeout_seconds=10,
+    ),
+    "application.queue_health": ActionDefinition(
+        "application.queue_health",
+        True,
+        frozenset({"application_id"}),
+        arguments_model=ApplicationArguments,
+        max_timeout_seconds=10,
+    ),
+    "application.config_fingerprint": ActionDefinition(
+        "application.config_fingerprint",
+        True,
+        frozenset({"application_id"}),
+        arguments_model=ApplicationArguments,
+        max_timeout_seconds=3,
+    ),
+    "application.deploy_version": ActionDefinition(
+        "application.deploy_version",
+        True,
+        frozenset({"application_id"}),
+        arguments_model=ApplicationArguments,
+        max_timeout_seconds=3,
+    ),
     "systemd.is_active": ActionDefinition("systemd.is_active", True, frozenset({"unit"})),
     "systemd.service_status": ActionDefinition(
         "systemd.service_status",

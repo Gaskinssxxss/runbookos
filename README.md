@@ -82,6 +82,8 @@ The read-only Network/DNS/TLS example (`examples/runbooks/network-dns-tls-review
 
 The read-only storage example (`examples/runbooks/storage-filesystem-review.yml`) uses fixed inventory `storage_targets` aliases and per-host `allowed_storage_targets`. Legacy `os.disk` and `filesystem.inodes` explicit paths require a separate per-host `allowed_storage_paths` entry; the shipped example policy permits only `/`. It distinguishes byte and inode pressure, expected mounts, path metadata, bounded usage and two-snapshot log growth. The shipped inventory keeps these targets commented out, so operators must register reviewed paths privately before planning can allow the example. See [operations](docs/operations.md) for limits and unknown-state handling.
 
+The read-only application example (`examples/runbooks/application-web-review.yml`) combines a registered application profile with existing TCP and systemd diagnostics. Application profiles bind health, queue, dependency, and non-secret file metadata to inventory aliases; the shipped policy denies all application profiles until reviewed IDs are explicitly allowed. See [operations](docs/operations.md) for the action contract and uncertainty limits.
+
 ```sh
 export RUNBOOKOS_SSH_KEY="$HOME/.ssh/runbookos-readonly"
 export RUNBOOKOS_KNOWN_HOSTS="$HOME/.ssh/runbookos_known_hosts"
