@@ -13,8 +13,52 @@ PG_QUERIES={
     "replication": "SELECT json_build_object('stats_visible',pg_has_role(current_user,'pg_read_all_stats','MEMBER'),'in_recovery',pg_is_in_recovery(),'sender_count',(SELECT count(*) FROM pg_stat_replication),'receiver_count',(SELECT count(*) FROM pg_stat_wal_receiver),'max_replay_lag_seconds',(SELECT max(extract(epoch from replay_lag)) FROM pg_stat_replication))::text",
     "sessions": "SELECT json_build_object('stats_visible',pg_has_role(current_user,'pg_read_all_stats','MEMBER'),'active',count(*) FILTER (WHERE state='active'),'idle',count(*) FILTER (WHERE state='idle'),'long_transaction_count',count(*) FILTER (WHERE xact_start IS NOT NULL AND clock_timestamp()-xact_start > interval '5 minutes'),'long_query_count',count(*) FILTER (WHERE state='active' AND query_start IS NOT NULL AND clock_timestamp()-query_start > interval '5 minutes'),'waiting_count',count(*) FILTER (WHERE wait_event_type IS NOT NULL),'oldest_transaction_seconds',max(extract(epoch from clock_timestamp()-xact_start)))::text FROM pg_stat_activity",
 }
-def bounded_postgresql(argv,env,timeout):
-    try: process=subprocess.Popen(argv,env=env,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,close_fds=True,start_new_session=True)
+def valid_probe_metadata(endpoint):
+    if not isinstance(endpoint,dict): return False
+    base={'protocol','address','port','path'}
+    dns=base|{'dns_name','resolver_address'}
+    legacy=dns|{'local_listener'}
+    current=legacy|{'database_name','database_user','credential_id','pressure_storage_ids'}
+    if set(endpoint) not in (base,dns,legacy,current): return False
+    protocol=endpoint.get('protocol')
+    if protocol not in ('tcp','http','https','postgresql') or not valid_private_ipv4(endpoint.get('address')) or type(endpoint.get('port')) is not int or not 1<=endpoint['port']<=65535: return False
+    path=endpoint.get('path')
+    if protocol in ('http','https'):
+        if not isinstance(path,str) or not re.fullmatch(r'/[A-Za-z0-9_./-]{0,127}',path) or path.startswith('//') or '..' in path.split('/'): return False
+    elif path is not None: return False
+    name=endpoint.get('dns_name'); resolver=endpoint.get('resolver_address')
+    if name is not None and not valid_dns_name(name): return False
+    if resolver is not None and (name is None or not valid_private_ipv4(resolver)): return False
+    if 'local_listener' in endpoint and type(endpoint['local_listener']) is not bool: return False
+    database=endpoint.get('database_name'); user=endpoint.get('database_user'); credential=endpoint.get('credential_id')
+    if any(value is not None for value in (database,user,credential)):
+        if protocol!='postgresql' or name is None or not isinstance(database,str) or not re.fullmatch(r'[a-zA-Z_][a-zA-Z0-9_]{0,62}',database) or not isinstance(user,str) or not re.fullmatch(r'[a-z_][a-z0-9_]{0,62}',user) or not isinstance(credential,str) or not re.fullmatch(r'[a-z][a-z0-9_-]{1,62}',credential): return False
+    storage=endpoint.get('pressure_storage_ids',[])
+    if type(storage) is not list or len(storage)>8 or len(storage)!=len(set(str(value) for value in storage)) or any(not isinstance(value,str) or not re.fullmatch(r'[a-z][a-z0-9_-]{1,62}',value) for value in storage) or storage and protocol!='postgresql': return False
+    return True
+def open_postgresql_credential(home,credential):
+    flags=os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC
+    parent=os.open(home,flags)
+    try:
+        if os.fstat(parent).st_uid!=os.getuid(): raise OSError('home ownership denied')
+        for part in ('.config','runbookos','pgpass'):
+            child=os.open(part,flags,dir_fd=parent)
+            try:
+                info=os.fstat(child)
+                if not stat.S_ISDIR(info.st_mode) or info.st_uid!=os.getuid() or info.st_mode & 0o077: raise OSError('credential directory denied')
+            except BaseException:
+                os.close(child); raise
+            os.close(parent); parent=child
+        fd=os.open(credential,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=parent)
+        try:
+            info=os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid() or info.st_mode & 0o077 or info.st_size>4096: raise OSError('credential file denied')
+        except BaseException:
+            os.close(fd); raise
+        return fd
+    finally: os.close(parent)
+def bounded_postgresql(argv,env,timeout,credential_fd):
+    try: process=subprocess.Popen(argv,env=env,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,close_fds=True,pass_fds=(credential_fd,),start_new_session=True)
     except OSError: return None,b'',b'','psql_unavailable'
     output={process.stdout:bytearray(),process.stderr:bytearray()}
     limits={process.stdout:4096,process.stderr:256}
@@ -44,23 +88,20 @@ def bounded_postgresql(argv,env,timeout):
         process.stdout.close(); process.stderr.close()
 def postgresql_inspect(args,timeout):
     endpoint=args.get('_endpoint'); endpoint_id=args.get('endpoint_id'); check=args.get('check')
-    if not isinstance(endpoint,dict) or check not in PG_QUERIES or not isinstance(endpoint_id,str) or not re.fullmatch(r'[a-z][a-z0-9_-]{1,62}',endpoint_id): raise ValueError('PostgreSQL check denied')
+    if not valid_probe_metadata(endpoint) or check not in PG_QUERIES or not isinstance(endpoint_id,str) or not re.fullmatch(r'[a-z][a-z0-9_-]{1,62}',endpoint_id): raise ValueError('PostgreSQL check denied')
     address=endpoint.get('address'); name=endpoint.get('dns_name'); port=endpoint.get('port'); database=endpoint.get('database_name'); user=endpoint.get('database_user'); credential=endpoint.get('credential_id')
     if endpoint.get('protocol')!='postgresql' or not valid_private_ipv4(address) or not valid_dns_name(name) or type(port) is not int or not 1<=port<=65535 or not isinstance(database,str) or not re.fullmatch(r'[a-zA-Z_][a-zA-Z0-9_]{0,62}',database) or not isinstance(user,str) or not re.fullmatch(r'[a-z_][a-z0-9_]{0,62}',user) or not isinstance(credential,str) or not re.fullmatch(r'[a-z][a-z0-9_-]{1,62}',credential) or type(timeout) is not int or not 1<=timeout<=10: raise ValueError('PostgreSQL source denied')
     data={'endpoint_id':endpoint_id,'check':check,'status':'unknown','authentication_available':None,'query_succeeded':False,'sql_health_authorized':True,'tcp_reachable':None,'protocol_responsive':None}
-    home=pwd.getpwuid(os.getuid()).pw_dir; directory=os.path.join(home,'.config','runbookos','pgpass'); path=os.path.join(directory,credential)
-    try:
-        for parent in (os.path.join(home,'.config'),os.path.join(home,'.config','runbookos'),directory):
-            info=os.lstat(parent)
-            if not stat.S_ISDIR(info.st_mode) or info.st_uid!=os.getuid() or info.st_mode & 0o077: raise OSError('credential directory denied')
-        info=os.lstat(path)
-        if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid() or info.st_mode & 0o077 or info.st_size>4096: raise OSError('credential file denied')
+    home=pwd.getpwuid(os.getuid()).pw_dir
+    try: credential_fd=open_postgresql_credential(home,credential)
     except OSError: return data,'credential_unavailable'
-    if not os.path.isfile('/usr/bin/psql'): return data,'psql_unavailable'
-    env={'PATH':'/usr/bin:/bin','HOME':home,'PGPASSFILE':path,'PGHOST':name,'PGHOSTADDR':address,'PGPORT':str(port),'PGDATABASE':database,'PGUSER':user,'PGSSLMODE':'verify-full','PGCONNECT_TIMEOUT':str(min(timeout,5)),'PGOPTIONS':'-c default_transaction_read_only=on -c statement_timeout=5000 -c lock_timeout=1000 -c search_path=pg_catalog'}
+    if not os.path.isfile('/usr/bin/psql'):
+        os.close(credential_fd); return data,'psql_unavailable'
+    env={'PATH':'/usr/bin:/bin','HOME':home,'PGPASSFILE':'/proc/self/fd/'+str(credential_fd),'PGHOST':name,'PGHOSTADDR':address,'PGPORT':str(port),'PGDATABASE':database,'PGUSER':user,'PGSSLMODE':'verify-full','PGCONNECT_TIMEOUT':str(min(timeout,5)),'PGOPTIONS':'-c default_transaction_read_only=on -c statement_timeout=5000 -c lock_timeout=1000 -c search_path=pg_catalog'}
     argv=['/usr/bin/psql','-X','-w','-q','-t','-A','-v','ON_ERROR_STOP=1','-v','VERBOSITY=sqlstate','-c',PG_QUERIES[check]]
     started=time.monotonic()
-    returncode,stdout,stderr,command_error=bounded_postgresql(argv,env,timeout)
+    try: returncode,stdout,stderr,command_error=bounded_postgresql(argv,env,timeout,credential_fd)
+    finally: os.close(credential_fd)
     data['duration_seconds']=round(time.monotonic()-started,3)
     if command_error: return data,command_error
     if returncode!=0:
@@ -173,7 +214,9 @@ def application_diagnostic(action,args,timeout):
     finally: data["duration_seconds"]=round(time.monotonic()-start,3)
 def probe_endpoint(action, args, timeout):
     endpoint=args.get("_endpoint")
-    if not isinstance(endpoint,dict) or not {"protocol","address","port","path"}<=set(endpoint) or set(endpoint)-{"protocol","address","port","path","dns_name","resolver_address","local_listener","database_name","database_user","credential_id","pressure_storage_ids"}: raise ValueError("invalid endpoint")
+    if not isinstance(endpoint,dict) or not {"protocol","address","port","path"}<=set(endpoint): raise ValueError("invalid endpoint")
+    if not valid_private_ipv4(endpoint["address"]): raise ValueError("endpoint address denied")
+    if not valid_probe_metadata(endpoint): raise ValueError("invalid endpoint")
     address=endpoint["address"]
     if not isinstance(address,str) or not re.fullmatch(r"[0-9]{1,3}(?:\.[0-9]{1,3}){3}",address): raise ValueError("endpoint address denied")
     ip=ipaddress.ip_address(address)

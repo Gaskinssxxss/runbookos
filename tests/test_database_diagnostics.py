@@ -3,7 +3,8 @@ from __future__ import annotations
 import base64
 import json
 import os
-import stat
+import pwd
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -39,14 +40,10 @@ ENDPOINT = {
 }
 
 
-def remote(monkeypatch, capsys, check="readiness", endpoint=None, timeout=4):
+def dispatch_remote(monkeypatch, capsys, action, arguments, timeout=4):
     request = {
-        "action": "postgresql.inspect",
-        "arguments": {
-            "endpoint_id": "db_one",
-            "check": check,
-            "_endpoint": endpoint or ENDPOINT,
-        },
+        "action": action,
+        "arguments": arguments,
         "timeout_seconds": timeout,
     }
     monkeypatch.setattr(
@@ -56,19 +53,28 @@ def remote(monkeypatch, capsys, check="readiness", endpoint=None, timeout=4):
     return json.loads(capsys.readouterr().out)
 
 
-def authorized_files(monkeypatch):
-    monkeypatch.setattr(
-        os,
-        "lstat",
-        lambda _: SimpleNamespace(
-            st_mode=stat.S_IFREG | 0o600
-            if str(_).endswith("test-credential")
-            else stat.S_IFDIR | 0o700,
-            st_uid=os.getuid(),
-            st_size=10,
-        ),
+def remote(monkeypatch, capsys, check="readiness", endpoint=None, timeout=4):
+    return dispatch_remote(
+        monkeypatch,
+        capsys,
+        "postgresql.inspect",
+        {"endpoint_id": "db_one", "check": check, "_endpoint": endpoint or ENDPOINT},
+        timeout,
     )
+
+
+def authorized_files(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    directory = home / ".config" / "runbookos" / "pgpass"
+    directory.mkdir(parents=True, mode=0o700)
+    for part in (home / ".config", home / ".config" / "runbookos", directory):
+        part.chmod(0o700)
+    (directory / "test-credential").write_text("synthetic-only\n")
+    (directory / "test-credential").chmod(0o600)
+    monkeypatch.setattr(pwd, "getpwuid", lambda _: SimpleNamespace(pw_dir=str(home)))
     monkeypatch.setattr(os.path, "isfile", lambda _: True)
+    return directory / "test-credential"
 
 
 def response(monkeypatch, payload, returncode=0, stderr=b""):
@@ -147,14 +153,16 @@ def test_plan_requires_registered_policy_allowed_database(tmp_path: Path):
         RunbookEngine(paths).plan(runbook)
 
 
-def test_readiness_uses_fixed_query_and_sanitized_environment(monkeypatch, capsys):
-    authorized_files(monkeypatch)
+def test_readiness_uses_fixed_query_and_sanitized_environment(monkeypatch, capsys, tmp_path):
+    authorized_files(monkeypatch, tmp_path)
     calls = response(monkeypatch, b'{"query_succeeded":true,"in_recovery":false}\n')
     result = remote(monkeypatch, capsys)
     assert result["ok"] and result["data"]["query_succeeded"]
     argv, kwargs = calls[0]
     assert argv[0] == "/usr/bin/psql" and "BEGIN" not in " ".join(argv)
     assert kwargs["env"]["PGSSLMODE"] == "verify-full"
+    assert kwargs["env"]["PGPASSFILE"] == f"/proc/self/fd/{kwargs['pass_fds'][0]}"
+    assert len(kwargs["pass_fds"]) == 1
     assert "default_transaction_read_only=on" in kwargs["env"]["PGOPTIONS"]
     assert "password" not in json.dumps(result).lower()
 
@@ -179,8 +187,8 @@ def test_readiness_uses_fixed_query_and_sanitized_environment(monkeypatch, capsy
         ),
     ],
 )
-def test_bounded_aggregate_checks(monkeypatch, capsys, check, payload, signal):
-    authorized_files(monkeypatch)
+def test_bounded_aggregate_checks(monkeypatch, capsys, tmp_path, check, payload, signal):
+    authorized_files(monkeypatch, tmp_path)
     response(monkeypatch, payload)
     result = remote(monkeypatch, capsys, check)
     assert result["ok"] and result["data"][signal]
@@ -189,8 +197,8 @@ def test_bounded_aggregate_checks(monkeypatch, capsys, check, payload, signal):
         assert result["data"]["long_query_count"] == 1
 
 
-def test_reserved_capacity_contributes_to_pressure(monkeypatch, capsys):
-    authorized_files(monkeypatch)
+def test_reserved_capacity_contributes_to_pressure(monkeypatch, capsys, tmp_path):
+    authorized_files(monkeypatch, tmp_path)
     response(
         monkeypatch,
         b'{"stats_visible":true,"active":6,"idle":2,"total":8,"max_connections":10,"superuser_reserved":1,"reserved_connections":1}',
@@ -211,8 +219,10 @@ def test_reserved_capacity_contributes_to_pressure(monkeypatch, capsys):
         (b"x" * 4097, 0, b"", "output_limit_exceeded"),
     ],
 )
-def test_failures_are_sanitized(monkeypatch, capsys, payload, returncode, stderr, category):
-    authorized_files(monkeypatch)
+def test_failures_are_sanitized(
+    monkeypatch, capsys, tmp_path, payload, returncode, stderr, category
+):
+    authorized_files(monkeypatch, tmp_path)
     response(monkeypatch, payload, returncode, stderr)
     result = remote(monkeypatch, capsys)
     assert result["ok"] is False and result["error"] == category
@@ -220,8 +230,8 @@ def test_failures_are_sanitized(monkeypatch, capsys, payload, returncode, stderr
         assert stderr.decode(errors="ignore") not in json.dumps(result)
 
 
-def test_missing_stats_privilege_is_unknown(monkeypatch, capsys):
-    authorized_files(monkeypatch)
+def test_missing_stats_privilege_is_unknown(monkeypatch, capsys, tmp_path):
+    authorized_files(monkeypatch, tmp_path)
     response(
         monkeypatch,
         b'{"stats_visible":false,"active":1,"idle":1,"total":2,"max_connections":100,"superuser_reserved":3,"reserved_connections":0}',
@@ -231,19 +241,234 @@ def test_missing_stats_privilege_is_unknown(monkeypatch, capsys):
     assert "total" not in result["data"] and result["data"]["status"] == "unknown"
 
 
-def test_excessive_sql_stderr_is_bounded_and_not_persisted(monkeypatch, capsys):
-    authorized_files(monkeypatch)
+def test_excessive_sql_stderr_is_bounded_and_not_persisted(monkeypatch, capsys, tmp_path):
+    authorized_files(monkeypatch, tmp_path)
     response(monkeypatch, b"", 1, b"secret-token-" * 100)
     result = remote(monkeypatch, capsys)
     assert result["error"] == "output_limit_exceeded"
     assert "secret-token" not in json.dumps(result)
 
 
-def test_credential_metadata_failure_never_runs_sql(monkeypatch, capsys):
-    monkeypatch.setattr(os, "lstat", lambda _: (_ for _ in ()).throw(FileNotFoundError()))
+def test_credential_metadata_failure_never_runs_sql(monkeypatch, capsys, tmp_path):
+    authorized_files(monkeypatch, tmp_path).chmod(0o644)
     monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("SQL invoked"))
     result = remote(monkeypatch, capsys)
     assert result["error"] == "credential_unavailable"
+
+
+@pytest.mark.parametrize(
+    "unsafe", ["symlink_file", "symlink_directory", "public_file", "public_directory"]
+)
+def test_credential_path_rejects_symlinks_and_public_permissions(
+    monkeypatch, capsys, tmp_path, unsafe
+):
+    credential = authorized_files(monkeypatch, tmp_path)
+    if unsafe == "symlink_file":
+        credential.rename(credential.with_name("original"))
+        credential.symlink_to(credential.with_name("original"))
+    elif unsafe == "symlink_directory":
+        directory = credential.parent
+        directory.rename(directory.with_name("original_pgpass"))
+        directory.symlink_to(directory.with_name("original_pgpass"), target_is_directory=True)
+    elif unsafe == "public_file":
+        credential.chmod(0o644)
+    else:
+        credential.parent.chmod(0o755)
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("SQL invoked"))
+    assert remote(monkeypatch, capsys)["error"] == "credential_unavailable"
+
+
+def test_credential_inode_remains_bound_if_path_is_replaced(monkeypatch, capsys, tmp_path):
+    credential = authorized_files(monkeypatch, tmp_path)
+    response(monkeypatch, b'{"query_succeeded":true,"in_recovery":false}')
+    fake_popen = subprocess.Popen
+
+    def replace_after_validation(argv, **kwargs):
+        fd = kwargs["pass_fds"][0]
+        credential.unlink()
+        credential.write_text("replacement\n")
+        credential.chmod(0o600)
+        assert os.pread(fd, 64, 0) == b"synthetic-only\n"
+        return fake_popen(argv, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", replace_after_validation)
+    assert remote(monkeypatch, capsys)["ok"] is True
+
+
+class ProtocolSocket:
+    def __init__(self, response=b"S"):
+        self.response = response
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return None
+
+    def settimeout(self, _):
+        return None
+
+    def sendall(self, _):
+        return None
+
+    def recv(self, _):
+        return self.response
+
+
+def test_protocol_and_sql_inspection_share_typed_endpoint(monkeypatch, capsys, tmp_path):
+    authorized_files(monkeypatch, tmp_path)
+    response(monkeypatch, b'{"query_succeeded":true,"in_recovery":false}')
+    monkeypatch.setattr(socket, "create_connection", lambda *_a, **_k: ProtocolSocket())
+    endpoint = ProbeTarget.model_validate(ENDPOINT).model_dump()
+    protocol = dispatch_remote(
+        monkeypatch,
+        capsys,
+        "postgresql.protocol_available",
+        {"endpoint_id": "db_one", "_endpoint": endpoint},
+    )
+    inspection = dispatch_remote(
+        monkeypatch,
+        capsys,
+        "postgresql.inspect",
+        {"endpoint_id": "db_one", "check": "readiness", "_endpoint": endpoint},
+    )
+    assert protocol["ok"] is True and protocol["data"]["protocol_available"] is True
+    assert protocol["data"]["authentication_attempted"] is False
+    assert protocol["data"]["database_readiness_verified"] is False
+    assert inspection["ok"] is True and inspection["data"]["query_succeeded"] is True
+
+
+def test_example_runbook_executes_protocol_and_sql_on_one_authorized_alias(
+    monkeypatch, capsys, tmp_path
+):
+    authorized_files(monkeypatch, tmp_path)
+    monkeypatch.setattr(socket, "create_connection", lambda *_a, **_k: ProtocolSocket())
+    paths = write_config_tree(tmp_path)
+    inventory = yaml.safe_load(paths.inventory.read_text())
+    inventory["hosts"]["example-db-01"] = inventory["hosts"].pop("test-web")
+    inventory["hosts"]["example-db-01"]["probe_targets"] = {
+        "db_main": ProbeTarget.model_validate(ENDPOINT).model_dump()
+    }
+    paths.inventory.write_text(yaml.safe_dump(inventory))
+    policy = yaml.safe_load(paths.policy.read_text())
+    policy["hosts"]["example-db-01"] = policy["hosts"].pop("test-web")
+    policy["hosts"]["example-db-01"]["diagnostic_actions"] = [
+        "postgresql.protocol_available",
+        "postgresql.inspect",
+    ]
+    paths.policy.write_text(yaml.safe_dump(policy))
+    example = Path(__file__).resolve().parents[1] / "examples/runbooks/database-data-review.yml"
+    assert RunbookEngine(paths).plan(example).status == "denied"
+    policy["hosts"]["example-db-01"]["allowed_probe_targets"] = ["db_main"]
+    paths.policy.write_text(yaml.safe_dump(policy))
+
+    payloads = {
+        "readiness": b'{"query_succeeded":true,"in_recovery":false}',
+        "connections": b'{"stats_visible":true,"active":1,"idle":1,"total":2,"max_connections":100,"superuser_reserved":3,"reserved_connections":0}',
+        "replication": b'{"stats_visible":true,"in_recovery":false,"sender_count":0,"receiver_count":0,"max_replay_lag_seconds":null}',
+        "sessions": b'{"stats_visible":true,"active":1,"idle":1,"long_transaction_count":0,"long_query_count":0,"waiting_count":0,"oldest_transaction_seconds":null}',
+    }
+
+    class Fake:
+        def execute(self, host, action, arguments, timeout_seconds):
+            assert arguments["endpoint_id"] == "db_main"
+            assert (
+                arguments["_endpoint"]
+                == inventory["hosts"]["example-db-01"]["probe_targets"]["db_main"]
+            )
+            if action == "postgresql.inspect":
+                response(monkeypatch, payloads[arguments["check"]])
+            result = dispatch_remote(monkeypatch, capsys, action, arguments, timeout_seconds)
+            return SSHResult(
+                ok=result["ok"],
+                data=result["data"],
+                error=result["error"],
+                uncertain=result["uncertain"],
+            )
+
+    engine = RunbookEngine(paths, executor=Fake())
+    plan = engine.plan(example)
+    assert plan.status == "ready"
+    execution_id, status = engine.execute(plan.plan_id, diagnostic_only=True)
+    assert status == "succeeded"
+    execution = engine.store.execution(execution_id)
+    assert len(execution["steps"]) == 5
+    correlation = execution["execution"]["summary"]["database_correlation"][0]
+    assert correlation["checks"]["protocol"] == "healthy"
+    assert correlation["checks"]["readiness"] == "observed"
+    assert engine.store.verify_audit_chain()[0] is True
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        "postgresql.protocol_available",
+        "network.tcp_connect",
+        "network.reachability",
+        "network.dns_resolve",
+    ],
+)
+def test_existing_probes_accept_sql_metadata_without_confusing_health(monkeypatch, capsys, action):
+    endpoint = ProbeTarget.model_validate(ENDPOINT).model_dump()
+    endpoint["resolver_address"] = "10.21.30.53"
+    monkeypatch.setattr(socket, "create_connection", lambda *_a, **_k: ProtocolSocket(b"X"))
+
+    class TimeoutDNS:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def settimeout(self, _):
+            return None
+
+        def sendto(self, *_):
+            return None
+
+        def recvfrom(self, *_):
+            raise TimeoutError()
+
+    monkeypatch.setattr(socket, "socket", lambda *_a, **_k: TimeoutDNS())
+    result = dispatch_remote(
+        monkeypatch, capsys, action, {"endpoint_id": "db_one", "_endpoint": endpoint}
+    )
+    assert result["error"] != "ValueError: invalid endpoint"
+    if action == "postgresql.protocol_available":
+        assert result["data"]["protocol_available"] is False
+        assert result["data"]["database_readiness_verified"] is False
+    elif action == "network.dns_resolve":
+        assert result["data"]["status"] == "timeout"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"unexpected": "value"},
+        {"database_name": ["invalid"]},
+        {"credential_id": "../escape"},
+        {"pressure_storage_ids": ["a", "a"]},
+        {"address": "169.254.169.254"},
+    ],
+)
+def test_remote_rejects_invalid_complete_endpoint_before_network(monkeypatch, capsys, mutation):
+    endpoint = {**ProbeTarget.model_validate(ENDPOINT).model_dump(), **mutation}
+    monkeypatch.setattr(
+        socket, "create_connection", lambda *_a, **_k: pytest.fail("network called")
+    )
+    protocol = dispatch_remote(
+        monkeypatch,
+        capsys,
+        "postgresql.protocol_available",
+        {"endpoint_id": "db_one", "_endpoint": endpoint},
+    )
+    inspection = dispatch_remote(
+        monkeypatch,
+        capsys,
+        "postgresql.inspect",
+        {"endpoint_id": "db_one", "check": "readiness", "_endpoint": endpoint},
+    )
+    assert protocol["ok"] is False and inspection["ok"] is False
 
 
 def step(action, endpoint, step_id, data, status="succeeded", error=None):
@@ -350,8 +575,8 @@ def test_engine_persists_scoped_database_evidence_and_rejects_stale_policy(tmp_p
         engine.execute(stale.plan_id, diagnostic_only=True)
 
 
-def test_sql_timeout_and_malformed_values_fail_closed(monkeypatch, capsys):
-    authorized_files(monkeypatch)
+def test_sql_timeout_and_malformed_values_fail_closed(monkeypatch, capsys, tmp_path):
+    authorized_files(monkeypatch, tmp_path)
     original = REAL_POPEN
 
     def timeout(*args, **kwargs):
