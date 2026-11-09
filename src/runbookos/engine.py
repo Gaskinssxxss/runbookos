@@ -801,6 +801,7 @@ class RunbookEngine:
                     and (
                         item.arguments.get("application_id") == application_id
                         or item.arguments.get("endpoint_id") in app.dependency_endpoint_ids
+                        or item.arguments.get("storage_id") in app.pressure_storage_ids
                         or (
                             app.worker_unit is not None
                             and item.arguments.get("unit") == app.worker_unit
@@ -815,6 +816,8 @@ class RunbookEngine:
                         target,
                         application_id,
                         app,
+                        frozenset(app.pressure_storage_ids)
+                        & frozenset(host_policy.allowed_storage_targets),
                     )
                 )
         if app_summaries:

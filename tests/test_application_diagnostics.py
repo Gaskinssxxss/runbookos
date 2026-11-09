@@ -417,6 +417,11 @@ def test_schema_rejects_unregistered_source_and_arbitrary_arguments(tmp_path):
     inventory["hosts"]["test-web"]["applications"]["sample_app"]["health_endpoint_id"] = "missing"
     with pytest.raises(ValidationError):
         Host.model_validate(inventory["hosts"]["test-web"])
+    for invalid_storage_id in ("missing", "config_file"):
+        invalid = yaml.safe_load(paths.inventory.read_text())["hosts"]["test-web"]
+        invalid["applications"]["sample_app"]["pressure_storage_ids"] = [invalid_storage_id]
+        with pytest.raises(ValidationError):
+            Host.model_validate(invalid)
     with pytest.raises(ConfigurationError):
         validate_action(
             "application.health", {"application_id": "sample_app", "url": "http://evil.test/"}
@@ -584,7 +589,7 @@ def test_multifault_correlation_keeps_observations_separate_from_cause():
             {"endpoint_id": "app_health", "certificate_status": "expired"},
         ),
         ("network.listener", "listener", {"endpoint_id": "app_health", "status": "port_closed"}),
-        ("filesystem.pressure", "pressure", {"status": "inode_full"}),
+        ("filesystem.pressure", "pressure", {"storage_id": "app_pressure", "status": "inode_full"}),
     ]
     steps = [
         {
@@ -597,7 +602,11 @@ def test_multifault_correlation_keeps_observations_separate_from_cause():
         for action, step_id, data in items
     ]
     result = correlate_application(
-        steps, "test-web", "sample_app", ApplicationProfile.model_validate(profile())
+        steps,
+        "test-web",
+        "sample_app",
+        ApplicationProfile.model_validate(profile(pressure_storage_ids=["app_pressure"])),
+        frozenset({"app_pressure"}),
     )
     assert {item["signal"] for item in result["signals"]} == {
         "queue_backlog",
@@ -607,3 +616,170 @@ def test_multifault_correlation_keeps_observations_separate_from_cause():
         "resource_pressure",
     }
     assert result["verified_root_cause"] is False
+
+
+@pytest.mark.parametrize(
+    ("storage_id", "status", "step_status", "authorized", "expected_signal"),
+    [
+        (None, "byte_full", "succeeded", True, "storage_pressure"),
+        ("unknown_storage", "inode_full", "succeeded", True, "storage_pressure"),
+        ("app_pressure", "byte_full", "succeeded", False, "storage_pressure"),
+        ("app_pressure", "unknown", "unknown", True, None),
+        (None, "unknown", "unknown", True, None),
+        ("app_pressure", "both_full", "succeeded", True, "resource_pressure"),
+        ("app_pressure", "available", "succeeded", True, None),
+    ],
+)
+def test_pressure_requires_authorized_application_storage_mapping(
+    storage_id, status, step_status, authorized, expected_signal
+):
+    data = {"status": status}
+    if storage_id is not None:
+        data["storage_id"] = storage_id
+    steps = [
+        {
+            "target": "test-web",
+            "action": "filesystem.pressure",
+            "step_id": "pressure",
+            "status": step_status,
+            "evidence": {"data": data},
+        }
+    ]
+    result = correlate_application(
+        steps,
+        "test-web",
+        "sample_app",
+        ApplicationProfile.model_validate(profile(pressure_storage_ids=["app_pressure"])),
+        frozenset({"app_pressure"}) if authorized else frozenset(),
+    )
+    specific = {entry["signal"] for entry in result["signals"]}
+    context = {entry["signal"] for entry in result["host_context"]}
+    if expected_signal == "resource_pressure":
+        assert specific == {"resource_pressure"} and context == set()
+    elif expected_signal == "storage_pressure":
+        assert specific == set() and context == {"storage_pressure"}
+        assert result["host_context"][0]["scope"] == "host_context"
+        assert result["host_context"][0]["step_id"] == "pressure"
+    else:
+        assert specific == set()
+        if status == "unknown":
+            assert result["unknown_steps"] == ["pressure"]
+    assert result["verified_root_cause"] is False
+
+
+def test_two_applications_on_one_host_keep_storage_pressure_attribution(tmp_path):
+    paths = configured_engine(tmp_path)
+    inventory = yaml.safe_load(paths.inventory.read_text())
+    host = inventory["hosts"]["test-web"]
+    host["probe_targets"]["other_health"] = endpoint("/other-health")
+    for storage_id in ("app_pressure", "other_pressure"):
+        directory = tmp_path / storage_id
+        directory.mkdir()
+        host["storage_targets"][storage_id] = {"path": str(directory), "kind": "directory"}
+    host["applications"]["sample_app"]["pressure_storage_ids"] = ["app_pressure"]
+    host["applications"]["other_app"] = profile(
+        health_endpoint_id="other_health", pressure_storage_ids=["other_pressure"]
+    )
+    paths.inventory.write_text(yaml.safe_dump(inventory))
+    policy = yaml.safe_load(paths.policy.read_text())
+    host_policy = policy["hosts"]["test-web"]
+    host_policy["allowed_applications"].append("other_app")
+    host_policy["allowed_probe_targets"].append("other_health")
+    host_policy["allowed_storage_targets"].extend(["app_pressure", "other_pressure"])
+    host_policy["diagnostic_actions"].append("filesystem.pressure")
+    paths.policy.write_text(yaml.safe_dump(policy))
+    steps = [
+        {
+            "id": "healthy_app",
+            "action": "application.health",
+            "with": {"application_id": "sample_app"},
+            "timeout_seconds": 3,
+        },
+        {
+            "id": "other_pressure",
+            "action": "filesystem.pressure",
+            "with": {"storage_id": "other_pressure"},
+            "timeout_seconds": 3,
+        },
+    ]
+
+    class Fake:
+        def execute(self, host, action, arguments, timeout_seconds):
+            if action == "application.health":
+                return SSHResult(
+                    ok=True,
+                    data={
+                        "application_id": "sample_app",
+                        "status": "healthy",
+                        "http_status": 200,
+                    },
+                )
+            assert arguments["_storage"]["path"] == str(tmp_path / "other_pressure")
+            return SSHResult(ok=True, data={"storage_id": "other_pressure", "status": "byte_full"})
+
+    engine = RunbookEngine(paths, executor=Fake())
+    plan = engine.plan(runbook(tmp_path, steps))
+    assert plan.status == "ready"
+    execution_id, status = engine.execute(plan.plan_id, diagnostic_only=True)
+    assert status == "succeeded"
+    summaries = {
+        item["application_id"]: item
+        for item in engine.store.execution(execution_id)["execution"]["summary"][
+            "application_correlation"
+        ]
+    }
+    assert summaries["sample_app"]["health"] == {
+        "status": "healthy",
+        "http_status": 200,
+        "step_id": "healthy_app",
+    }
+    assert summaries["sample_app"]["signals"] == []
+    assert summaries["sample_app"]["host_context"][0]["storage_id"] == "other_pressure"
+    assert summaries["other_app"]["signals"] == [
+        {
+            "signal": "resource_pressure",
+            "step_id": "other_pressure",
+            "claim_status": "observed",
+        }
+    ]
+    assert summaries["other_app"]["health"]["status"] == "missing"
+    assert all(not item["verified_root_cause"] for item in summaries.values())
+    assert engine.store.verify_audit_chain()[0] is True
+
+
+def test_http_503_probe_execution_succeeds_but_observed_service_is_unhealthy(tmp_path):
+    paths = configured_engine(tmp_path)
+    namespace = remote_helpers()
+    fake_http(namespace, 503, {"Content-Type": "text/plain"})
+    steps = [
+        {
+            "id": "health",
+            "action": "application.health",
+            "with": {"application_id": "sample_app"},
+            "timeout_seconds": 3,
+        }
+    ]
+
+    class Fake:
+        def execute(self, host, action, arguments, timeout_seconds):
+            data, error = namespace["application_diagnostic"](action, arguments, timeout_seconds)
+            return SSHResult(ok=error is None, data=data, error=error)
+
+    engine = RunbookEngine(paths, executor=Fake())
+    plan = engine.plan(runbook(tmp_path, steps))
+    assert plan.status == "ready"
+    execution_id, status = engine.execute(plan.plan_id, diagnostic_only=True)
+    assert status == "succeeded"  # The read-only measurement completed.
+    detail = engine.store.execution(execution_id)
+    assert detail["steps"][0]["status"] == "succeeded"
+    assert detail["steps"][0]["evidence"]["data"]["status"] == "unhealthy"
+    summary = detail["execution"]["summary"]["application_correlation"][0]
+    assert summary["health"] == {"status": "unhealthy", "http_status": 503, "step_id": "health"}
+    assert summary["signals"] == [
+        {
+            "signal": "http_gateway_unavailable",
+            "step_id": "health",
+            "claim_status": "observed",
+        }
+    ]
+    assert summary["verified_root_cause"] is False

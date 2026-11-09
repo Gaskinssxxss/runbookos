@@ -27,10 +27,12 @@ hosts:
     # storage_targets:
     #   app_config: {path: /opt/example/app/config.public, kind: file}
     #   app_version: {path: /opt/example/app/VERSION, kind: file}
+    #   app_volume: {path: /opt/example/app/data, kind: directory}
     # applications:
     #   app_demo:
     #     health_endpoint_id: app_health
     #     dependency_endpoint_ids: [upstream]
+    #     pressure_storage_ids: [app_volume]
     #     queue_endpoint_id: queue_health
     #     queue_max_depth: 10
     #     queue_max_age_seconds: 60

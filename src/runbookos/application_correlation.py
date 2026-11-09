@@ -6,11 +6,17 @@ from typing import Any
 
 
 def correlate_application(
-    steps: list[dict[str, Any]], target: str, application_id: str, profile: Any
+    steps: list[dict[str, Any]],
+    target: str,
+    application_id: str,
+    profile: Any,
+    authorized_storage_ids: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     signals: list[dict[str, str]] = []
+    host_context: list[dict[str, Any]] = []
     unknown_steps: list[str] = []
     dependencies: dict[str, str] = {}
+    health: dict[str, Any] = {"status": "missing", "http_status": None, "step_id": None}
     relevant = [step for step in steps if step.get("target") == target]
 
     def observed(signal: str, step_id: str) -> None:
@@ -63,6 +69,52 @@ def correlate_application(
             and data.get("application_id") != application_id
         ):
             continue
+        if action == "application.health":
+            health = {
+                "status": data.get("status")
+                if step.get("status") == "succeeded"
+                and data.get("status") in {"healthy", "unhealthy", "redirect"}
+                else "unknown",
+                "http_status": data.get("http_status")
+                if type(data.get("http_status")) is int
+                else None,
+                "step_id": step_id,
+            }
+        if action == "filesystem.pressure":
+            storage_id = data.get("storage_id")
+            storage_related = isinstance(storage_id, str) and storage_id in authorized_storage_ids
+            status = data.get("status")
+            if step.get("status") != "succeeded" or status not in {
+                "available",
+                "byte_full",
+                "inode_full",
+                "both_full",
+            }:
+                unknown_steps.append(step_id)
+                if not storage_related:
+                    host_context.append(
+                        {
+                            "signal": "storage_pressure_unavailable",
+                            "step_id": step_id,
+                            "storage_id": storage_id if isinstance(storage_id, str) else None,
+                            "scope": "host_context",
+                            "claim_status": "unknown",
+                        }
+                    )
+            elif status in {"byte_full", "inode_full", "both_full"}:
+                if storage_related:
+                    observed("resource_pressure", step_id)
+                else:
+                    host_context.append(
+                        {
+                            "signal": "storage_pressure",
+                            "step_id": step_id,
+                            "storage_id": storage_id if isinstance(storage_id, str) else None,
+                            "scope": "host_context",
+                            "claim_status": "observed",
+                        }
+                    )
+            continue
         if step.get("status") != "succeeded" or data.get("status") == "unknown":
             if action and (
                 action.startswith("application.")
@@ -104,17 +156,13 @@ def correlate_application(
             in {profile.health_endpoint_id, *profile.dependency_endpoint_ids}
         ):
             observed("tls_invalid", step_id)
-        elif action == "filesystem.pressure" and data.get("status") in {
-            "byte_full",
-            "inode_full",
-            "both_full",
-        }:
-            observed("resource_pressure", step_id)
     return {
         "application_id": application_id,
         "target": target,
+        "health": health,
         "dependencies": dependencies,
         "signals": signals[:32],
+        "host_context": host_context[:32],
         "unknown_steps": sorted(set(unknown_steps))[:32],
         "verified_root_cause": False,
     }

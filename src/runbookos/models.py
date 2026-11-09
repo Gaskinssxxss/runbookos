@@ -193,6 +193,7 @@ class StorageTarget(StrictModel):
 class ApplicationProfile(StrictModel):
     health_endpoint_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{1,62}$")
     dependency_endpoint_ids: list[str] = Field(default_factory=list, max_length=8)
+    pressure_storage_ids: list[str] = Field(default_factory=list, max_length=8)
     queue_endpoint_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]{1,62}$")
     queue_max_depth: int | None = Field(default=None, ge=0, le=1000000)
     queue_max_age_seconds: int | None = Field(default=None, ge=0, le=86400)
@@ -212,6 +213,11 @@ class ApplicationProfile(StrictModel):
             raise ValueError("dependency endpoint IDs must be unique")
         if self.health_endpoint_id in self.dependency_endpoint_ids:
             raise ValueError("application health cannot be its own dependency")
+        if len(self.pressure_storage_ids) != len(set(self.pressure_storage_ids)) or any(
+            not re.fullmatch(r"[a-z][a-z0-9_-]{1,62}", storage_id)
+            for storage_id in self.pressure_storage_ids
+        ):
+            raise ValueError("application pressure storage IDs must be unique inventory aliases")
         for pair in (
             (self.queue_endpoint_id, self.queue_max_depth),
             (self.queue_endpoint_id, self.queue_max_age_seconds),
@@ -266,6 +272,12 @@ class Host(StrictModel):
                     or self.storage_targets[storage_id].kind != "file"
                 ):
                     raise ValueError("application artifact must be a registered file target")
+            for storage_id in app.pressure_storage_ids:
+                if (
+                    storage_id not in self.storage_targets
+                    or self.storage_targets[storage_id].kind != "directory"
+                ):
+                    raise ValueError("application pressure storage must be a registered directory")
         return self
 
     @field_validator("address")
