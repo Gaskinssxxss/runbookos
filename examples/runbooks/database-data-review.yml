@@ -1,0 +1,29 @@
+api_version: runbookos/v1
+kind: Runbook
+metadata:
+  id: database-data-review
+  name: PostgreSQL evidence review
+  description: Fixed read-only protocol and aggregate SQL diagnostics for one registered database.
+  risk: low
+targets: [example-db-01]
+steps:
+  - id: protocol
+    action: postgresql.protocol_available
+    with: {endpoint_id: db_main}
+    timeout_seconds: 5
+  - id: readiness
+    action: postgresql.inspect
+    with: {endpoint_id: db_main, check: readiness}
+    timeout_seconds: 10
+  - id: connections
+    action: postgresql.inspect
+    with: {endpoint_id: db_main, check: connections}
+    timeout_seconds: 10
+  - id: replication
+    action: postgresql.inspect
+    with: {endpoint_id: db_main, check: replication}
+    timeout_seconds: 10
+  - id: sessions
+    action: postgresql.inspect
+    with: {endpoint_id: db_main, check: sessions}
+    timeout_seconds: 10

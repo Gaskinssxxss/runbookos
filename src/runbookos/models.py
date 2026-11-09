@@ -107,6 +107,10 @@ class ProbeTarget(StrictModel):
     dns_name: str | None = Field(default=None, max_length=253)
     resolver_address: str | None = Field(default=None, max_length=15)
     local_listener: bool = Field(default=False, strict=True)
+    database_name: str | None = Field(default=None, pattern=r"^[a-zA-Z_][a-zA-Z0-9_]{0,62}$")
+    database_user: str | None = Field(default=None, pattern=r"^[a-z_][a-z0-9_]{0,62}$")
+    credential_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]{1,62}$")
+    pressure_storage_ids: list[str] = Field(default_factory=list, max_length=8)
 
     @field_validator("address")
     @classmethod
@@ -168,6 +172,20 @@ class ProbeTarget(StrictModel):
             raise ValueError("only HTTP probe targets accept a path")
         if self.resolver_address is not None and self.dns_name is None:
             raise ValueError("resolver address requires an explicit DNS name")
+        if any(v is not None for v in (self.database_name, self.database_user, self.credential_id)):
+            if self.protocol != "postgresql" or not all(
+                v is not None
+                for v in (self.database_name, self.database_user, self.credential_id, self.dns_name)
+            ):
+                raise ValueError(
+                    "SQL inspection requires PostgreSQL, pinned hostname and complete credential metadata"
+                )
+        if self.pressure_storage_ids and (
+            self.protocol != "postgresql"
+            or len(self.pressure_storage_ids) != len(set(self.pressure_storage_ids))
+            or any(not re.fullmatch(r"[a-z][a-z0-9_-]{1,62}", v) for v in self.pressure_storage_ids)
+        ):
+            raise ValueError("PostgreSQL pressure storage IDs must be unique aliases")
         return self
 
 
@@ -244,6 +262,13 @@ class Host(StrictModel):
 
     @model_validator(mode="after")
     def valid_applications(self) -> Host:
+        for endpoint in self.probe_targets.values():
+            for storage_id in endpoint.pressure_storage_ids:
+                if (
+                    storage_id not in self.storage_targets
+                    or self.storage_targets[storage_id].kind != "directory"
+                ):
+                    raise ValueError("PostgreSQL pressure storage must be a registered directory")
         for name, app in self.applications.items():
             if not re.fullmatch(r"[a-z][a-z0-9_-]{1,62}", name):
                 raise ValueError("application IDs must be lowercase inventory aliases")

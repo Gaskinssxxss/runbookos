@@ -78,6 +78,34 @@ def populated_source(tmp_path: Path) -> tuple[Path, str]:
     return source, incident_id
 
 
+def test_validation_status_preserves_independent_recovery_gates(tmp_path: Path) -> None:
+    source, _ = populated_source(tmp_path)
+    backup = source.parent / "backup.sqlite3"
+    staging = source.parent / "staging.sqlite3"
+    assert state_backup.create_backup(source, backup)["status"] == "PASS"
+    assert state_backup.rehearse_restore(backup, staging)["status"] == "PASS"
+    result = CliRunner().invoke(
+        app, ["state", "validation-status", str(backup), "--staging", str(staging)]
+    )
+    assert result.exit_code == 0
+    status = json.loads(result.stdout)
+    assert status["backup_integrity"] == "PASS"
+    assert status["audit_chain"] == "PASS"
+    assert status["staging_review"] == "PASS"
+    assert status["restore_rehearsal"] == "NOT_VERIFIED"
+    assert status["production_recovery_readiness"] == "NOT_VERIFIED"
+
+
+def test_validation_status_rejects_invalid_backup(tmp_path: Path) -> None:
+    result = CliRunner().invoke(
+        app, ["state", "validation-status", str(tmp_path / "missing.sqlite3")]
+    )
+    assert result.exit_code == 1
+    status = json.loads(result.stdout)
+    assert status["backup_integrity"] != "PASS"
+    assert status["staging_review"] == "NOT_VERIFIED"
+
+
 def seed_deleted_step_result(source: Path) -> None:
     """Leave application rows unchanged while advancing AUTOINCREMENT state."""
     with closing(sqlite3.connect(source)) as db:

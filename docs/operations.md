@@ -55,6 +55,20 @@ The local OS username is recorded as the approval actor. The operator must state
 
 If the controller process stops, inspect SQLite history. If a row remains `running`, classify the result as uncertain; RunbookOS does not resume or retry an in-flight plan or investigation. Restore the SQLite DB from a protected backup if damaged, then run `audit`; do not edit chain rows to make verification pass. A lost DB also loses local plan/approval/investigation state, so re-plan and obtain fresh approval.
 
+### PostgreSQL database diagnostics
+
+`postgresql.protocol_available` remains a one-byte protocol probe. It does not authenticate. The new `postgresql.inspect` action accepts only `{endpoint_id, check}` with `check` one of `readiness`, `connections`, `replication`, or `sessions`. Both actions accept the same validated PostgreSQL inventory endpoint, including its optional SQL metadata. Each action is read-only, has a 10-second maximum, fixed SQL, one JSON aggregate row, and a 4 KiB response limit. Inventory must bind a private IPv4 address, TLS hostname, database, read-only user, and credential alias; policy must separately allow the action and endpoint. The remote user needs 0700 `~/.config/runbookos/pgpass` and parent configuration directories, plus a 0600 credential file named by the alias. Provision these outside the repository. The dispatcher opens each directory without following its final symlink, verifies owner and mode with file descriptors, then pins the credential inode through a child-inherited descriptor at `/proc/self/fd/N`; pathname replacement after validation cannot redirect libpq to a new file. Same-UID mutation of the already-open inode and privileged local compromise remain outside this protection, so keep the credential account and directory private. libpq uses `verify-full`, a read-only transaction default, 5-second statement timeout, and 1-second lock timeout. SQL statistics require `pg_read_all_stats`; without it, aggregates are unknown. No application rows, query text, client addresses, or session identities are returned. `postgresql.start_fixture` remains disposable-only.
+
+| Action | Source | Evidence | Unknown or failure |
+| --- | --- | --- | --- |
+| `postgresql.protocol_available` | Pinned endpoint SSL negotiation | `protocol_available`, `ssl_supported`; no authentication | TCP or protocol failure |
+| `postgresql.inspect` `readiness` | Fixed `pg_is_in_recovery()` SQL | Authenticated query success and role flag | Credential, TLS, authentication, query failure |
+| `postgresql.inspect` `connections` | `pg_stat_activity`, fixed settings | Active/idle/total, maximum and reserved capacity, utilization, possible exhaustion | Missing stats privilege, malformed response, timeout |
+| `postgresql.inspect` `replication` | `pg_stat_replication`, `pg_stat_wal_receiver` | Primary/standby and observed peer counts/lag | Missing privilege or peer evidence; standalone is not failed replication |
+| `postgresql.inspect` `sessions` | Aggregate `pg_stat_activity` | State counts, long transactions and queries, waits, oldest age | Missing privilege or statistics |
+
+All checks use only inventory aliases and per-host default-deny policy. Diagnostic execution success means the observation was captured; it does not mean the database is healthy. Database correlation remains endpoint-scoped with step references and `verified_root_cause: false`. Run the read-only [example](../examples/runbooks/database-data-review.yml) only after configuring a trusted private source and policy. RunbookOS SQLite `state backup` below concerns controller state, **not** PostgreSQL application-database backups; those remain outside this R1 package.
+
 ### Schema-v4 backup, verification, and staging restore rehearsal
 
 Use an existing directory owned by the current user with mode 0700 and a destination filename that does not exist. The source database and its parent must also be private and owned by the current user. These commands work offline and do not require inventory, SSH, or a provider:
@@ -65,6 +79,7 @@ install -d -m 700 "$BACKUP_DIR"
 runbookos --db "$DB_PATH" state backup --output "$BACKUP_DIR/runbookos.sqlite3"
 runbookos state verify-backup "$BACKUP_DIR/runbookos.sqlite3"
 runbookos state rehearse-restore "$BACKUP_DIR/runbookos.sqlite3" --output "$BACKUP_DIR/staging.sqlite3"
+runbookos state validation-status "$BACKUP_DIR/runbookos.sqlite3" --staging "$BACKUP_DIR/staging.sqlite3"
 runbookos state review-staging "$BACKUP_DIR/staging.sqlite3"
 ```
 
@@ -79,6 +94,8 @@ Path checks reject symlinks, path traversal, aliases, non-owner files, group/wor
 For a controller or managed-host outage, use the environment owner's independent console/recovery path. RunbookOS does not change network topology, firewall policy, or install agents as part of diagnosis. Its optional inference tunnel is foreground-only and must be stopped by its operator; RunbookOS does not create a service unit or auto-start configuration.
 
 For synthetic incident fixtures and evaluation semantics, see [incident-evaluation.md](incident-evaluation.md). `runbookos evaluate` does not connect to managed hosts or inject faults.
+
+`state validation-status` reuses `verify-backup` and optionally `review-staging` to show separate backup-integrity, audit-chain, and staging-review gates. It deliberately reports backup creation, rehearsal provenance, and production recovery readiness as `NOT_VERIFIED`: a valid current file does not prove how it was created, and staging review does not prove that a specific rehearsal command produced it. Keep the original operation outputs as separate evidence.
 
 ## SSH access changes
 

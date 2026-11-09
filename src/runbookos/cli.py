@@ -183,6 +183,32 @@ def state_review_staging(
         raise typer.Exit(1)
 
 
+@state_app.command("validation-status")
+def state_validation_status(
+    backup: Path = typer.Argument(..., help="Existing private SQLite backup."),
+    staging: Path | None = typer.Option(None, "--staging", help="Optional private staging copy."),
+) -> None:
+    """Report independent offline validation gates without inferring recovery readiness."""
+    backup_result = verify_backup(backup)
+    staging_result = review_staging(staging) if staging is not None else None
+    _json(
+        {
+            "backup_created": "NOT_VERIFIED",
+            "backup_integrity": backup_result["status"],
+            "backup_reason_code": backup_result["reason_code"],
+            "audit_chain": backup_result["status"],
+            "restore_rehearsal": "NOT_VERIFIED",
+            "staging_review": staging_result["status"] if staging_result else "NOT_VERIFIED",
+            "staging_reason_code": staging_result["reason_code"] if staging_result else None,
+            "production_recovery_readiness": "NOT_VERIFIED",
+        }
+    )
+    if backup_result["status"] != "PASS" or (
+        staging_result is not None and staging_result["status"] != "PASS"
+    ):
+        raise typer.Exit(1)
+
+
 @app.command()
 def version() -> None:
     """Show the installed RunbookOS version."""
